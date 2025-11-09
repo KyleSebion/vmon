@@ -1,22 +1,28 @@
-use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
+use std::thread::sleep;
+use std::thread::Builder as Thread;
+use std::time::Duration;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     let peripherals = Peripherals::take().unwrap();
+    let gpio8 = peripherals.pins.gpio8;
 
-    let mut led = PinDriver::output(peripherals.pins.gpio8).unwrap();
-    let _ = std::thread::Builder::new().stack_size(2000).spawn(|| loop {
+    let t1 = Thread::new().stack_size(2000).spawn(|| loop {
         log::info!("Nothing");
-        FreeRtos::delay_ms(500);
+        sleep(Duration::from_millis(500));
     });
-    let _ = std::thread::Builder::new()
-        .stack_size(2000)
-        .spawn(move || loop {
+    let t2 = Thread::new().stack_size(2000).spawn(move || {
+        let mut led = PinDriver::output(gpio8).unwrap();
+        loop {
             log::info!("LED Toggle");
             led.toggle().unwrap();
-            FreeRtos::delay_ms(100);
-        });
+            sleep(Duration::from_millis(100));
+        }
+    });
+    for t in [t1, t2] {
+        t.unwrap().join().unwrap();
+    }
 }
