@@ -8,7 +8,6 @@ use esp_idf_svc::wifi::AuthMethod;
 use esp_idf_svc::wifi::Configuration;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_svc::wifi::Protocol;
-use esp_idf_svc::wifi::WifiEvent;
 use std::thread::Builder as Thread;
 // cargo remove esp-idf-sys if not needed
 
@@ -16,13 +15,9 @@ fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
-
     let peripherals = Peripherals::take().unwrap();
 
     let sys_loop = EspSystemEventLoop::take().unwrap();
-    let _wifi_sub = sys_loop
-        .subscribe::<WifiEvent, _>(|ev| log::info!("WifiEvent: {ev:?}"))
-        .unwrap();
     let nvs = EspDefaultNvsPartition::take().unwrap();
     let mut wifi = EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs)).unwrap();
     let conf = Configuration::AccessPoint(AccessPointConfiguration {
