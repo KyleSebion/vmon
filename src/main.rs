@@ -18,10 +18,9 @@ fn main() {
     log::set_max_level(log::LevelFilter::Debug);
 
     let peripherals = Peripherals::take().unwrap();
-    let gpio8 = peripherals.pins.gpio8;
 
     let sys_loop = EspSystemEventLoop::take().unwrap();
-    sys_loop
+    let _wifi_sub = sys_loop
         .subscribe::<WifiEvent, _>(|ev| log::info!("WifiEvent: {ev:?}"))
         .unwrap();
     let nvs = EspDefaultNvsPartition::take().unwrap();
@@ -38,12 +37,13 @@ fn main() {
     });
     wifi.set_configuration(&conf).unwrap();
     wifi.start().unwrap();
-    FreeRtos::delay_ms(1000);
 
     let t1 = Thread::new().stack_size(2000).spawn(|| loop {
         log::info!("Nothing");
         FreeRtos::delay_ms(2000);
     });
+
+    let gpio8 = peripherals.pins.gpio8;
     let t2 = Thread::new().stack_size(2000).spawn(move || {
         let mut led = PinDriver::output(gpio8).unwrap();
         loop {
@@ -52,6 +52,7 @@ fn main() {
             FreeRtos::delay_ms(1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_millis(100)); at end
         }
     });
+
     for t in [t1, t2] {
         t.unwrap().join().unwrap();
     }
