@@ -5,7 +5,7 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::AccessPointConfiguration;
 use esp_idf_svc::wifi::AuthMethod;
-use esp_idf_svc::wifi::Configuration;
+use esp_idf_svc::wifi::Configuration as WiFiConf;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_svc::wifi::Protocol;
 use std::thread::Builder as Thread;
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
     let mut wifi = EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?;
-    let conf = Configuration::AccessPoint(AccessPointConfiguration {
+    let conf = WiFiConf::AccessPoint(AccessPointConfiguration {
         ssid: "ESP2".try_into().unwrap(),
         ssid_hidden: false,
         channel: 1,

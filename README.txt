@@ -1,0 +1,1 @@
+Project created with: cargo generate esp-rs/esp-idf-template cargo

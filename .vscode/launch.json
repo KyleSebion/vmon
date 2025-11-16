@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run ESP32",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "cargo.exe",
+            "args": ["run"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
