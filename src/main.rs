@@ -70,7 +70,7 @@ static DATA_FILE: LazyLock<Mutex<File>> = LazyLock::new(|| {
             .append(true)
             .read(true)
             .open(DATA_FILE_PATH)
-            .expect(""),
+            .unwrap_or_else(|_| panic!("failed to open file: {DATA_FILE_PATH}")),
     )
 });
 fn get_lock<'a>() -> Result<MutexGuard<'a, File>> {
@@ -85,9 +85,9 @@ fn append_data(d: &str) -> anyhow::Result<()> {
     }
     let mut f = get_lock()?;
     if f.metadata()?.len() == 0 {
-        f.write_all("ts,vin_volts,adc_volts,smoothed,oversampled,rtc_ts\n".as_bytes())?;
+        writeln!(f, "ts,vin_volts,adc_volts,smoothed,oversampled,rtc_ts")?;
     }
-    f.write_all(format!("{d}\n").as_bytes())?;
+    writeln!(f, "{d}")?;
     f.flush()?;
     Ok(())
 }
@@ -95,6 +95,7 @@ fn clear_data() -> anyhow::Result<()> {
     let mut f = get_lock()?;
     f.set_len(0)?;
     f.flush()?;
+    f.sync_all()?;
     Ok(())
 }
 fn read_data() -> anyhow::Result<String> {
@@ -110,6 +111,14 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
     mount_storage()?;
+
+    log::error!("{}", read_data()?);
+    append_data("3")?;
+    log::error!("{}", read_data()?);
+    append_data("4")?;
+    log::error!("{}", read_data()?);
+    clear_data()?;
+    log::error!("{}", read_data()?);
 
     let peripherals = Peripherals::take()?;
 
