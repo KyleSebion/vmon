@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["KyleSebion <kyle@kylesebion.com>"]
 edition = "2021"
 resolver = "2"
-rust-version = "1.77"
+rust-version = "1.92"
 
 [[bin]]
 name = "p2"
@@ -26,7 +26,6 @@ experimental = ["esp-idf-svc/experimental"]
 log = "0.4"
 esp-idf-svc = "0.51"
 esp-idf-hal = "0.45.2"
-esp-idf-sys = "0.36.1"
 anyhow = "1.0.100"
 
 # --- Optional Embassy Integration ---
