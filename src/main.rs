@@ -1,8 +1,8 @@
 use anyhow::Result;
-use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::gpio::PinDriver;
-use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::delay::FreeRtos;
+use esp_idf_svc::hal::gpio::PinDriver;
+use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::esp_deep_sleep;
 use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
