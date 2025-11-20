@@ -130,19 +130,42 @@ type EspResultU16 = std::result::Result<u16, EspError>;
 type EspResultU32 = std::result::Result<u32, EspError>;
 trait AdcReadFn: FnMut() -> EspResultU16 {}
 impl<T: FnMut() -> EspResultU16> AdcReadFn for T {}
-fn get_oversampled_voltage<F: AdcReadFn, const N: u32>(adc_read_fn: &mut F) -> Result<u32> {
+fn get_oversampled_mv<F: AdcReadFn, const N: u32>(adc_read_fn: &mut F) -> Result<u32> {
     let s = (0..N)
         .map(|_| adc_read_fn().map(|v| v as u32))
         .sum::<EspResultU32>()?;
     Ok(s / N)
 }
+fn get_smoothed_mv(mv: u32) -> u32 {
+    const SMOOTH_BUF_SZ: usize = 8;
+    #[link_section = ".rtc.data"]
+    static mut SMOOTH_BUF_I: usize = usize::MAX;
+    #[link_section = ".rtc.data"]
+    static mut SMOOTH_BUF: [u32; SMOOTH_BUF_SZ] = [0; SMOOTH_BUF_SZ];
+    unsafe {
+        if SMOOTH_BUF_I == usize::MAX {
+            #[expect(static_mut_refs)]
+            SMOOTH_BUF.fill(mv);
+            SMOOTH_BUF_I = 0;
+        }
+        SMOOTH_BUF[SMOOTH_BUF_I] = mv;
+        SMOOTH_BUF_I = (SMOOTH_BUF_I + 1) / SMOOTH_BUF_SZ;
+        #[expect(static_mut_refs)]
+        let s = SMOOTH_BUF.iter().sum::<u32>();
+        s / SMOOTH_BUF_SZ as u32
+    }
+}
+
 fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F) -> Result<()> {
-    let ov = get_oversampled_voltage::<_, 16>(adc_read_fn)?;
+    let omv = get_oversampled_mv::<_, 16>(adc_read_fn)?;
+    let smv = get_smoothed_mv(omv);
+    //create csv line
+    //add line to file
     Ok(())
 }
 
-const DEEP_SLEEP_USEC: u64 = 5 * 1000 * 1000;
 fn main() -> Result<()> {
+    const DEEP_SLEEP_USEC: u64 = 5 * 1000 * 1000;
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
