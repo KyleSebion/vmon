@@ -1,5 +1,12 @@
+use anyhow::Ok;
 use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::adc::attenuation::DB_11 as Atten11dB;
+use esp_idf_svc::hal::adc::oneshot::config::AdcChannelConfig;
+use esp_idf_svc::hal::adc::oneshot::config::Calibration::Curve as CalCurve;
+use esp_idf_svc::hal::adc::oneshot::AdcChannelDriver;
+use esp_idf_svc::hal::adc::oneshot::AdcDriver;
+use esp_idf_svc::hal::adc::Resolution::Resolution12Bit;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -11,6 +18,7 @@ use esp_idf_svc::sys::esp_vfs_fat_info;
 use esp_idf_svc::sys::esp_vfs_fat_mount_config_t;
 use esp_idf_svc::sys::esp_vfs_fat_spiflash_mount_rw_wl;
 use esp_idf_svc::sys::wl_handle_t;
+use esp_idf_svc::sys::EspError;
 use esp_idf_svc::wifi::AccessPointConfiguration;
 use esp_idf_svc::wifi::AuthMethod;
 use esp_idf_svc::wifi::Configuration as WiFiConf;
@@ -118,19 +126,46 @@ fn uptime_usec() -> i64 {
     unsafe { esp_timer_get_time() }
 }
 
-fn record_voltage() {}
+type EspResultU16 = std::result::Result<u16, EspError>;
+type EspResultU32 = std::result::Result<u32, EspError>;
+trait AdcReadFn: FnMut() -> EspResultU16 {}
+impl<T: FnMut() -> EspResultU16> AdcReadFn for T {}
+fn get_oversampled_voltage<F: AdcReadFn, const N: u32>(adc_read_fn: &mut F) -> Result<u32> {
+    let s = (0..N)
+        .map(|_| adc_read_fn().map(|v| v as u32))
+        .sum::<EspResultU32>()?;
+    Ok(s / N)
+}
+fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F) -> Result<()> {
+    let ov = get_oversampled_voltage::<_, 16>(adc_read_fn)?;
+    Ok(())
+}
 
 const DEEP_SLEEP_USEC: u64 = 5 * 1000 * 1000;
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
     mount_storage()?;
     let peripherals = Peripherals::take()?;
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
+    let adc_driver = AdcDriver::new(peripherals.adc1)?;
+    let mut adc = AdcChannelDriver::new(
+        &adc_driver,
+        peripherals.pins.gpio0,
+        &AdcChannelConfig {
+            attenuation: Atten11dB,
+            calibration: CalCurve,
+            resolution: Resolution12Bit,
+        },
+    )?;
+    let mut adc_read_fn = || {
+        let raw = adc.read()?;
+        adc.raw_to_mv(raw)
+    };
 
     if woke_from_sleep() {
-        record_voltage();
+        record_voltage(&mut adc_read_fn)?;
         reset_then_sleep(DEEP_SLEEP_USEC);
     }
 
