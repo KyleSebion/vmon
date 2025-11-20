@@ -130,11 +130,12 @@ type EspResultU16 = std::result::Result<u16, EspError>;
 type EspResultU32 = std::result::Result<u32, EspError>;
 trait AdcReadFn: FnMut() -> EspResultU16 {}
 impl<T: FnMut() -> EspResultU16> AdcReadFn for T {}
-fn get_oversampled_mv<F: AdcReadFn, const N: u32>(adc_read_fn: &mut F) -> Result<u32> {
-    let s = (0..N)
+fn get_oversampled_mv<F: AdcReadFn>(adc_read_fn: &mut F) -> Result<u32> {
+    const SAMPLE_SZ: usize = 16;
+    let s = (0..SAMPLE_SZ)
         .map(|_| adc_read_fn().map(|v| v as u32))
         .sum::<EspResultU32>()?;
-    Ok(s / N)
+    Ok(s / SAMPLE_SZ as u32)
 }
 fn get_smoothed_mv(mv: u32) -> u32 {
     const SMOOTH_BUF_SZ: usize = 8;
@@ -147,9 +148,10 @@ fn get_smoothed_mv(mv: u32) -> u32 {
             #[expect(static_mut_refs)]
             SMOOTH_BUF.fill(mv);
             SMOOTH_BUF_I = 0;
+        } else {
+            SMOOTH_BUF[SMOOTH_BUF_I] = mv;
+            SMOOTH_BUF_I = (SMOOTH_BUF_I + 1) / SMOOTH_BUF_SZ;
         }
-        SMOOTH_BUF[SMOOTH_BUF_I] = mv;
-        SMOOTH_BUF_I = (SMOOTH_BUF_I + 1) / SMOOTH_BUF_SZ;
         #[expect(static_mut_refs)]
         let s = SMOOTH_BUF.iter().sum::<u32>();
         s / SMOOTH_BUF_SZ as u32
@@ -157,7 +159,7 @@ fn get_smoothed_mv(mv: u32) -> u32 {
 }
 
 fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F) -> Result<()> {
-    let omv = get_oversampled_mv::<_, 16>(adc_read_fn)?;
+    let omv = get_oversampled_mv(adc_read_fn)?;
     let smv = get_smoothed_mv(omv);
     //create csv line
     //add line to file
