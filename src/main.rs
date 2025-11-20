@@ -4,6 +4,9 @@ use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sys::esp_deep_sleep;
+use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
+use esp_idf_svc::sys::esp_timer_get_time;
 use esp_idf_svc::sys::esp_vfs_fat_info;
 use esp_idf_svc::sys::esp_vfs_fat_mount_config_t;
 use esp_idf_svc::sys::esp_vfs_fat_spiflash_mount_rw_wl;
@@ -13,7 +16,7 @@ use esp_idf_svc::wifi::AuthMethod;
 use esp_idf_svc::wifi::Configuration as WiFiConf;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_svc::wifi::Protocol;
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -24,12 +27,9 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::thread::Builder as Thread;
 
-const STOR_LBL: &str = "storage";
-const STOR_PATH: &str = "/storage";
-const STOR_MIN_FREE: u64 = 512 * 1024;
+const STOR_PATH: &CStr = c"/storage";
 fn mount_storage() -> Result<()> {
-    let part_label = CString::new(STOR_LBL)?;
-    let base_path = CString::new(STOR_PATH)?;
+    const STOR_LBL: &CStr = c"storage";
     let mount_config = esp_vfs_fat_mount_config_t {
         format_if_mount_failed: true,
         max_files: 4,
@@ -40,8 +40,8 @@ fn mount_storage() -> Result<()> {
     let mut wl_handle: wl_handle_t = 0;
     let res = unsafe {
         esp_vfs_fat_spiflash_mount_rw_wl(
-            base_path.as_ptr(),
-            part_label.as_ptr(),
+            STOR_PATH.as_ptr(),
+            STOR_LBL.as_ptr(),
             &mount_config,
             &mut wl_handle,
         )
@@ -52,10 +52,9 @@ fn mount_storage() -> Result<()> {
     Ok(())
 }
 fn get_storage_free_space() -> Result<u64> {
-    let base_path = CString::new(STOR_PATH)?;
     let mut total = 0;
     let mut free = 0;
-    let res = unsafe { esp_vfs_fat_info(base_path.as_ptr(), &mut total, &mut free) };
+    let res = unsafe { esp_vfs_fat_info(STOR_PATH.as_ptr(), &mut total, &mut free) };
     if res != 0 {
         anyhow::bail!("esp_vfs_fat_info failed; esp_err_t = {res}");
     }
@@ -79,6 +78,7 @@ fn get_lock<'a>() -> Result<MutexGuard<'a, File>> {
         .map_err(|e| anyhow::anyhow!("get_lock error: {:?}", e))
 }
 fn append_data(d: &str) -> anyhow::Result<()> {
+    const STOR_MIN_FREE: u64 = 512 * 1024;
     if get_storage_free_space()? < STOR_MIN_FREE {
         log::warn!("append_data canceled due to lack of minimum free space");
         return Ok(());
@@ -88,13 +88,12 @@ fn append_data(d: &str) -> anyhow::Result<()> {
         writeln!(f, "ts,vin_volts,adc_volts,smoothed,oversampled,rtc_ts")?;
     }
     writeln!(f, "{d}")?;
-    f.flush()?;
+    f.sync_all()?;
     Ok(())
 }
 fn clear_data() -> anyhow::Result<()> {
-    let mut f = get_lock()?;
+    let f = get_lock()?;
     f.set_len(0)?;
-    f.flush()?;
     f.sync_all()?;
     Ok(())
 }
@@ -106,21 +105,34 @@ fn read_data() -> anyhow::Result<String> {
     Ok(s)
 }
 
+fn reset_then_sleep(usec: u64) -> ! {
+    unsafe { esp_deep_sleep(usec) }
+}
+fn woke_from_sleep() -> bool {
+    !matches!(
+        unsafe { esp_sleep_get_wakeup_cause() },
+        esp_idf_svc::sys::esp_sleep_source_t_ESP_SLEEP_WAKEUP_UNDEFINED
+    )
+}
+fn uptime_usec() -> i64 {
+    unsafe { esp_timer_get_time() }
+}
+
+fn record_voltage() {}
+
+const DEEP_SLEEP_USEC: u64 = 5 * 1000 * 1000;
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
     mount_storage()?;
-
-    log::error!("{}", read_data()?);
-    append_data("3")?;
-    log::error!("{}", read_data()?);
-    append_data("4")?;
-    log::error!("{}", read_data()?);
-    clear_data()?;
-    log::error!("{}", read_data()?);
-
     let peripherals = Peripherals::take()?;
+    let mut led = PinDriver::output(peripherals.pins.gpio8)?;
+
+    if woke_from_sleep() {
+        record_voltage();
+        reset_then_sleep(DEEP_SLEEP_USEC);
+    }
 
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
@@ -143,11 +155,9 @@ fn main() -> anyhow::Result<()> {
         FreeRtos::delay_ms(500);
     })?;
 
-    let gpio8 = peripherals.pins.gpio8;
     let t2 = Thread::new()
         .stack_size(2000)
         .spawn(move || -> anyhow::Result<()> {
-            let mut led = PinDriver::output(gpio8)?;
             loop {
                 log::info!("LED Toggle");
                 led.toggle()?;
