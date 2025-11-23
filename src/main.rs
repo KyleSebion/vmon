@@ -211,9 +211,11 @@ fn read_rtc_str(i2c: &mut I2cDriver) -> Result<String> {
     ))
 }
 fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F, i2c: &mut I2cDriver) -> Result<()> {
+    let uptime = uptime_usec();
+    let rtc_ts = read_rtc_str(i2c)?;
     let mv = get_oversampled_mv(adc_read_fn)?;
     let mv = get_smoothed_mv(mv);
-    let line = format!("{},{},{mv}", uptime_usec(), read_rtc_str(i2c)?);
+    let line = format!("{uptime},{rtc_ts},{mv}");
     append_data(&line)?;
     Ok(())
 }
