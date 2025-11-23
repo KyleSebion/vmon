@@ -1,5 +1,7 @@
 use anyhow::Ok;
 use anyhow::Result;
+use esp_idf_hal::delay::BLOCK;
+use esp_idf_hal::units::FromValueType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::adc::attenuation::DB_11 as Atten11dB;
 use esp_idf_svc::hal::adc::oneshot::config::AdcChannelConfig;
@@ -9,6 +11,8 @@ use esp_idf_svc::hal::adc::oneshot::AdcDriver;
 use esp_idf_svc::hal::adc::Resolution::Resolution12Bit;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::gpio::PinDriver;
+use esp_idf_svc::hal::i2c::I2cConfig;
+use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::esp_deep_sleep;
@@ -93,7 +97,7 @@ fn append_data(d: &str) -> anyhow::Result<()> {
     }
     let mut f = get_lock()?;
     if f.metadata()?.len() == 0 {
-        writeln!(f, "ts,vin_volts,adc_volts,smoothed,oversampled,rtc_ts")?;
+        writeln!(f, "uptime,rtc_ts,mv")?;
     }
     writeln!(f, "{d}")?;
     f.sync_all()?;
@@ -158,11 +162,59 @@ fn get_smoothed_mv(mv: u32) -> u32 {
     }
 }
 
-fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F) -> Result<()> {
-    let omv = get_oversampled_mv(adc_read_fn)?;
-    let smv = get_smoothed_mv(omv);
-    //create csv line
-    //add line to file
+const DS3231_ADDR: u8 = 0x68;
+fn dec_to_bcd(d: u8) -> u8 {
+    ((d / 10) << 4) | (d % 10)
+}
+pub fn set_rtc(
+    i2c: &mut I2cDriver,
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> Result<()> {
+    let year = (year - 2000) as u8;
+    let data = [
+        0x00,
+        dec_to_bcd(second),
+        dec_to_bcd(minute),
+        dec_to_bcd(hour),
+        dec_to_bcd(0), // Day of week (not used here)
+        dec_to_bcd(day),
+        dec_to_bcd(month),
+        dec_to_bcd(year),
+    ];
+    i2c.write(DS3231_ADDR, &data, BLOCK)?;
+    Ok(())
+}
+fn bcd_to_dec(b: u8) -> u8 {
+    (b >> 4) * 10 + (b & 0x0F)
+}
+pub fn read_rtc(i2c: &mut I2cDriver) -> Result<(u16, u8, u8, u8, u8, u8)> {
+    i2c.write(DS3231_ADDR, &[0x00], BLOCK)?;
+    let mut buf = [0u8; 7];
+    i2c.read(DS3231_ADDR, &mut buf, BLOCK)?;
+    let second = bcd_to_dec(buf[0] & 0x7F);
+    let minute = bcd_to_dec(buf[1]);
+    let hour = bcd_to_dec(buf[2] & 0x3F);
+    let day = bcd_to_dec(buf[4]);
+    let month = bcd_to_dec(buf[5] & 0x1F);
+    let year = 2000 + bcd_to_dec(buf[6]) as u16;
+    Ok((year, month, day, hour, minute, second))
+}
+fn read_rtc_str(i2c: &mut I2cDriver) -> Result<String> {
+    let (year, month, day, hour, minute, second) = read_rtc(i2c)?;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+    ))
+}
+fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F, i2c: &mut I2cDriver) -> Result<()> {
+    let mv = get_oversampled_mv(adc_read_fn)?;
+    let mv = get_smoothed_mv(mv);
+    let line = format!("{},{},{mv}", uptime_usec(), read_rtc_str(i2c)?);
+    append_data(&line)?;
     Ok(())
 }
 
@@ -188,9 +240,15 @@ fn main() -> Result<()> {
         let raw = adc.read()?;
         adc.raw_to_mv(raw)
     };
+    let mut i2c = I2cDriver::new(
+        peripherals.i2c0,
+        peripherals.pins.gpio3,
+        peripherals.pins.gpio4,
+        &I2cConfig::new().baudrate(100.kHz().into()),
+    )?;
 
     if woke_from_sleep() {
-        record_voltage(&mut adc_read_fn)?;
+        record_voltage(&mut adc_read_fn, &mut i2c)?;
         reset_then_sleep(DEEP_SLEEP_USEC);
     }
 
