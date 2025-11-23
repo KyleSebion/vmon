@@ -154,7 +154,7 @@ fn get_smoothed_mv(mv: u32) -> u32 {
             SMOOTH_BUF_I = 0;
         } else {
             SMOOTH_BUF[SMOOTH_BUF_I] = mv;
-            SMOOTH_BUF_I = (SMOOTH_BUF_I + 1) / SMOOTH_BUF_SZ;
+            SMOOTH_BUF_I = (SMOOTH_BUF_I + 1) % SMOOTH_BUF_SZ;
         }
         #[expect(static_mut_refs)]
         let s = SMOOTH_BUF.iter().sum::<u32>();
