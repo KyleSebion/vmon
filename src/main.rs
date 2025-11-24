@@ -1,6 +1,7 @@
 use anyhow::Ok;
 use anyhow::Result;
-use esp_idf_hal::delay::BLOCK;
+use esp_idf_hal::delay::TickType;
+use esp_idf_hal::delay::TickType_t;
 use esp_idf_hal::units::FromValueType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::adc::attenuation::DB_11 as Atten11dB;
@@ -37,7 +38,7 @@ use std::io::Write;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::thread::Builder as Thread;
+use std::thread;
 
 const STOR_PATH: &CStr = c"/storage";
 fn mount_storage() -> Result<()> {
@@ -89,7 +90,7 @@ fn get_lock<'a>() -> Result<MutexGuard<'a, File>> {
         .lock()
         .map_err(|e| anyhow::anyhow!("get_lock error: {:?}", e))
 }
-fn append_data(d: &str) -> anyhow::Result<()> {
+fn append_data(d: &str) -> Result<()> {
     const STOR_MIN_FREE: u64 = 512 * 1024;
     if get_storage_free_space()? < STOR_MIN_FREE {
         log::warn!("append_data canceled due to lack of minimum free space");
@@ -97,19 +98,19 @@ fn append_data(d: &str) -> anyhow::Result<()> {
     }
     let mut f = get_lock()?;
     if f.metadata()?.len() == 0 {
-        writeln!(f, "uptime,rtc_ts,mv")?;
+        writeln!(f, "uptime_ms,rtc_ts,mv")?;
     }
     writeln!(f, "{d}")?;
     f.sync_all()?;
     Ok(())
 }
-fn clear_data() -> anyhow::Result<()> {
+fn clear_data() -> Result<()> {
     let f = get_lock()?;
     f.set_len(0)?;
     f.sync_all()?;
     Ok(())
 }
-fn read_data() -> anyhow::Result<String> {
+fn read_data() -> Result<String> {
     let mut f = get_lock()?;
     f.rewind()?;
     let mut s = String::new();
@@ -163,6 +164,7 @@ fn get_smoothed_mv(mv: u32) -> u32 {
 }
 
 const DS3231_ADDR: u8 = 0x68;
+const I2C_TIMEOUT: TickType_t = TickType::new_millis(1).0;
 fn dec_to_bcd(d: u8) -> u8 {
     ((d / 10) << 4) | (d % 10)
 }
@@ -186,16 +188,16 @@ pub fn set_rtc(
         dec_to_bcd(month),
         dec_to_bcd(year),
     ];
-    i2c.write(DS3231_ADDR, &data, BLOCK)?;
+    i2c.write(DS3231_ADDR, &data, I2C_TIMEOUT)?;
     Ok(())
 }
 fn bcd_to_dec(b: u8) -> u8 {
     (b >> 4) * 10 + (b & 0x0F)
 }
 pub fn read_rtc(i2c: &mut I2cDriver) -> Result<(u16, u8, u8, u8, u8, u8)> {
-    i2c.write(DS3231_ADDR, &[0x00], BLOCK)?;
+    i2c.write(DS3231_ADDR, &[0x00], I2C_TIMEOUT)?;
     let mut buf = [0u8; 7];
-    i2c.read(DS3231_ADDR, &mut buf, BLOCK)?;
+    i2c.read(DS3231_ADDR, &mut buf, I2C_TIMEOUT)?;
     let second = bcd_to_dec(buf[0] & 0x7F);
     let minute = bcd_to_dec(buf[1]);
     let hour = bcd_to_dec(buf[2] & 0x3F);
@@ -211,17 +213,18 @@ fn read_rtc_str(i2c: &mut I2cDriver) -> Result<String> {
     ))
 }
 fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F, i2c: &mut I2cDriver) -> Result<()> {
-    let uptime = uptime_usec();
+    let uptime_ms = uptime_usec() / 1000;
     let rtc_ts = read_rtc_str(i2c)?;
     let mv = get_oversampled_mv(adc_read_fn)?;
     let mv = get_smoothed_mv(mv);
-    let line = format!("{uptime},{rtc_ts},{mv}");
+    let line = format!("{uptime_ms},{rtc_ts},{mv}");
+    log::info!("{line}");
     append_data(&line)?;
     Ok(())
 }
 
 fn main() -> Result<()> {
-    const DEEP_SLEEP_USEC: u64 = 5 * 1000 * 1000;
+    const SLEEP_USEC: u32 = 5 * 1000 * 1000;
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -238,20 +241,20 @@ fn main() -> Result<()> {
             resolution: Resolution12Bit,
         },
     )?;
-    let mut adc_read_fn = || {
+    let mut adc_read_fn = move || {
         let raw = adc.read()?;
         adc.raw_to_mv(raw)
     };
     let mut i2c = I2cDriver::new(
         peripherals.i2c0,
-        peripherals.pins.gpio3,
         peripherals.pins.gpio4,
+        peripherals.pins.gpio3,
         &I2cConfig::new().baudrate(100.kHz().into()),
     )?;
 
     if woke_from_sleep() {
         record_voltage(&mut adc_read_fn, &mut i2c)?;
-        reset_then_sleep(DEEP_SLEEP_USEC);
+        reset_then_sleep(SLEEP_USEC.into());
     }
 
     let sys_loop = EspSystemEventLoop::take()?;
@@ -270,24 +273,18 @@ fn main() -> Result<()> {
     wifi.set_configuration(&conf)?;
     wifi.start()?;
 
-    let t1 = Thread::new().stack_size(2000).spawn(|| loop {
-        log::info!("Nothing");
-        FreeRtos::delay_ms(500);
-    })?;
-
-    let t2 = Thread::new()
-        .stack_size(2000)
-        .spawn(move || -> anyhow::Result<()> {
+    thread::scope(|s| -> Result<()> {
+        s.spawn(move || -> Result<()> {
             loop {
-                log::info!("LED Toggle");
-                led.toggle()?;
-                FreeRtos::delay_ms(100); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_millis(100)); at end
+                led.set_low()?;
+                clear_data()?;
+                record_voltage(&mut adc_read_fn, &mut i2c)?;
+                log::info!("{}", read_data()?);
+                led.set_high()?;
+                FreeRtos::delay_ms(SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
             }
-        })?;
-
-    for t in [t1, t2] {
-        t.join()
-            .map_err(|e| anyhow::anyhow!("thread panicked: {:?}", e))??;
-    }
+        });
+        Ok(())
+    })?;
     Ok(())
 }
