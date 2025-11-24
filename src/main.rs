@@ -162,6 +162,12 @@ fn get_smoothed_mv(mv: u32) -> u32 {
         s / SMOOTH_BUF_SZ as u32
     }
 }
+fn convert_adc_to_mv(mv: u32) -> u32 {
+    const R1: u32 = 33000;
+    const R2: u32 = 4700;
+    let mv = mv * (R1 + R2);
+    mv / R2
+}
 
 const DS3231_ADDR: u8 = 0x68;
 const I2C_TIMEOUT: TickType_t = TickType::new_millis(1).0;
@@ -217,6 +223,7 @@ fn record_voltage<F: AdcReadFn>(adc_read_fn: &mut F, i2c: &mut I2cDriver) -> Res
     let rtc_ts = read_rtc_str(i2c)?;
     let mv = get_oversampled_mv(adc_read_fn)?;
     let mv = get_smoothed_mv(mv);
+    let mv = convert_adc_to_mv(mv);
     let line = format!("{uptime_ms},{rtc_ts},{mv}");
     log::info!("{line}");
     append_data(&line)?;
@@ -277,9 +284,7 @@ fn main() -> Result<()> {
         s.spawn(move || -> Result<()> {
             loop {
                 led.set_low()?;
-                clear_data()?;
                 record_voltage(&mut adc_read_fn, &mut i2c)?;
-                log::info!("{}", read_data()?);
                 led.set_high()?;
                 FreeRtos::delay_ms(SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
             }
