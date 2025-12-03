@@ -252,7 +252,7 @@ impl DS3231 {
         ))
     }
 }
-struct Ina219 {
+struct INA219 {
     addr: u8,
     timeout: TickType_t,
     r_shunt: f64,              // Ω
@@ -262,7 +262,7 @@ struct Ina219 {
     calibration: u16,
     conf: u16,
 }
-impl Ina219 {
+impl INA219 {
     const REG_CONF: u8 = 0x00;
     const REG_SHUNT_V: u8 = 0x01;
     const REG_BUS_V: u8 = 0x02;
@@ -312,7 +312,7 @@ impl Ina219 {
     }
     fn read_bus_v(&mut self, i2c: &mut I2cDriver) -> Result<f64> {
         self.read_u16(i2c, Self::REG_BUS_V)
-            .map(|v| (v >> 3) as f64 * Ina219::BUS_VOLTAGE_LSB)
+            .map(|v| (v >> 3) as f64 * Self::BUS_VOLTAGE_LSB)
     }
     fn read_w(&mut self, i2c: &mut I2cDriver) -> Result<f64> {
         self.read_u16(i2c, Self::REG_POWER_W)
@@ -331,10 +331,10 @@ impl Ina219 {
 struct I2cDevices<'a> {
     i2c: I2cDriver<'a>,
     ds3231: DS3231,
-    ina219: Ina219,
+    ina219: INA219,
 }
 impl<'a> I2cDevices<'a> {
-    fn new(i2c: I2cDriver<'a>, ds3231: DS3231, ina219: Ina219) -> Result<Self> {
+    fn new(i2c: I2cDriver<'a>, ds3231: DS3231, ina219: INA219) -> Result<Self> {
         let mut s = Self {
             i2c,
             ds3231,
@@ -395,7 +395,7 @@ fn sub_main() -> Result<()> {
             &I2cConfig::new().baudrate(400.kHz().into()), //TODO 100?
         )?,
         DS3231::new(0x68),
-        Ina219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
+        INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
 
     //check if min voltage; maybe closure to record_measurements?
