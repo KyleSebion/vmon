@@ -423,13 +423,17 @@ fn main() -> Result<()> {
     let nvs = EspDefaultNvsPartition::take()?;
     let mut wifi = EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?;
     let conf = WiFiConf::AccessPoint(AccessPointConfiguration {
-        ssid: "ESP2".try_into().unwrap(),
+        ssid: "ESP2"
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("ssid error"))?,
         ssid_hidden: false,
         channel: 1,
         secondary_channel: None,
         protocols: Protocol::P802D11BGN.into(),
         auth_method: AuthMethod::WPA2Personal,
-        password: "kspass1234".try_into().unwrap(),
+        password: "kspass1234"
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("password error"))?,
         max_connections: 10,
     });
     wifi.set_configuration(&conf)?;
