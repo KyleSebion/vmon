@@ -17,6 +17,7 @@ use esp_idf_svc::sys::esp_timer_get_time;
 use esp_idf_svc::sys::esp_vfs_fat_info;
 use esp_idf_svc::sys::esp_vfs_fat_mount_config_t;
 use esp_idf_svc::sys::esp_vfs_fat_spiflash_mount_rw_wl;
+use esp_idf_svc::sys::rwdt_shim::feed_rtc_wdt;
 use esp_idf_svc::sys::wl_handle_t;
 use esp_idf_svc::wifi::AccessPointConfiguration;
 use esp_idf_svc::wifi::AuthMethod;
@@ -149,6 +150,11 @@ fn woke_from_sleep() -> bool {
 }
 fn uptime_usec() -> i64 {
     unsafe { esp_timer_get_time() }
+}
+fn feed_watchdog() {
+    unsafe {
+        feed_rtc_wdt();
+    }
 }
 
 fn get_smoothed<const I: usize>(val: f64) -> f64 {
@@ -374,17 +380,12 @@ fn record_measurements(i2c: &mut I2cDevices) -> Result<()> {
     Ok(())
 }
 
-fn main() {
-    if let Err(e) = sub_main() {
-        log::info!("main error: {e}")
-    }
-    unsafe { esp_idf_svc::sys::esp_restart() }
-}
-fn sub_main() -> Result<()> {
+fn main() -> Result<()> {
     const SLEEP_USEC: u32 = 2 * 1000 * 1000;
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
+    feed_watchdog();
     mount_storage()?;
     let peripherals = Peripherals::take()?;
     let mut i2c = I2cDevices::new(
@@ -425,6 +426,7 @@ fn sub_main() -> Result<()> {
     thread::scope(|s| {
         let r = Thread::new().stack_size(8000).spawn_scoped(s, move || {
             let mut b = move || -> Result<()> {
+                feed_watchdog();
                 led.set_low()?;
                 record_measurements(&mut i2c)?;
                 led.set_high()?;

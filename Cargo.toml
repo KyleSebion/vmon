@@ -47,3 +47,8 @@ anyhow = "1.0.100"
 
 [build-dependencies]
 embuild = "0.33"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components"]
+bindings_header  = "components/rwdt_shim/include/rwdt_shim.h"
+bindings_module  = "rwdt_shim"
