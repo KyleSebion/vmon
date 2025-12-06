@@ -1,6 +1,7 @@
 #![expect(dead_code)]
 use anyhow::Ok;
 use anyhow::Result;
+use embedded_svc::http::Method as HttpMethod;
 use esp_idf_hal::delay::TickType;
 use esp_idf_hal::delay::TickType_t;
 use esp_idf_hal::units::FromValueType;
@@ -10,6 +11,8 @@ use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::http::server::Configuration as HttpConf;
+use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::esp_deep_sleep;
 use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
@@ -438,26 +441,23 @@ fn main() -> Result<()> {
     });
     wifi.set_configuration(&conf)?;
     wifi.start()?;
-
-    thread::scope(|s| {
-        let r = Thread::new().stack_size(8000).spawn_scoped(s, move || {
-            let mut b = move || -> Result<()> {
-                feed_watchdog();
-                led.set_low()?;
-                record_measurements(&mut i2c, low_v_cb)?;
-                led.set_high()?;
-                Ok(())
-            };
-            loop {
-                if let Err(e) = b() {
-                    log::info!("thread body error: {e}");
-                }
-                FreeRtos::delay_ms(RECORD_SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
-            }
-        });
-        if let Err(e) = r {
-            log::info!("thread error: {e}");
+    let mut http_server = EspHttpServer::new(&HttpConf::default())?;
+    http_server.fn_handler("/", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        rs.write(format!("ts {}", uptime_usec()).as_bytes())?;
+        Ok(())
+    })?;
+    loop {
+        feed_watchdog();
+        if let Err(e) = led.set_low() {
+            log::warn!("led on error: {e}");
         }
-    });
-    Ok(())
+        if let Err(e) = record_measurements(&mut i2c, low_v_cb) {
+            log::error!("record_measurements error: {e}");
+        }
+        if let Err(e) = led.set_high() {
+            log::warn!("led off error: {e}");
+        }
+        FreeRtos::delay_ms(RECORD_SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
+    }
 }
