@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![expect(dead_code)]
 use anyhow::Ok;
 use anyhow::Result;
 use esp_idf_hal::delay::TickType;
