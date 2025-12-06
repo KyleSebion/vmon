@@ -36,8 +36,6 @@ use std::io::Write;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::thread;
-use std::thread::Builder as Thread;
 
 const STOR_PATH: &CStr = c"/storage";
 fn mount_storage() -> Result<()> {
