@@ -368,7 +368,7 @@ impl<'a> I2cDevices<'a> {
     }
 }
 
-fn record_measurements(i2c: &mut I2cDevices) -> Result<()> {
+fn record_measurements(i2c: &mut I2cDevices, v_cb: fn(f64)) -> Result<()> {
     let uptime_ms = uptime_usec() / 1000;
     let rtc_ts = i2c.read_ds3231_rtc_str()?;
     let w = get_smoothed::<0>(i2c.read_ina219_w()?);
@@ -377,11 +377,14 @@ fn record_measurements(i2c: &mut I2cDevices) -> Result<()> {
     let line = format!("{uptime_ms},{rtc_ts},{w:.2},{v:.2},{a:.3}");
     log::info!("{line}");
     // append_data(&line)?;
+    v_cb(v);
     Ok(())
 }
 
 fn main() -> Result<()> {
-    const SLEEP_USEC: u32 = 2 * 1000 * 1000;
+    const LOW_V: f64 = 12.2;
+    const LOW_V_SLEEP_USEC: u32 = 60 * 1000 * 1000;
+    const RECORD_SLEEP_USEC: u32 = 2 * 1000 * 1000;
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -398,12 +401,15 @@ fn main() -> Result<()> {
         DS3231::new(0x68),
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
-
-    //check if min voltage; maybe closure to record_measurements?
+    let low_v_cb = |v| {
+        if v <= LOW_V {
+            reset_then_sleep(LOW_V_SLEEP_USEC.into());
+        }
+    };
 
     if woke_from_sleep() {
-        record_measurements(&mut i2c)?;
-        reset_then_sleep(SLEEP_USEC.into());
+        record_measurements(&mut i2c, low_v_cb)?;
+        reset_then_sleep(RECORD_SLEEP_USEC.into());
     }
 
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
@@ -428,7 +434,7 @@ fn main() -> Result<()> {
             let mut b = move || -> Result<()> {
                 feed_watchdog();
                 led.set_low()?;
-                record_measurements(&mut i2c)?;
+                record_measurements(&mut i2c, low_v_cb)?;
                 led.set_high()?;
                 Ok(())
             };
@@ -436,7 +442,7 @@ fn main() -> Result<()> {
                 if let Err(e) = b() {
                     log::info!("thread body error: {e}");
                 }
-                FreeRtos::delay_ms(SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
+                FreeRtos::delay_ms(RECORD_SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
             }
         });
         if let Err(e) = r {
