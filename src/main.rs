@@ -70,37 +70,43 @@ fn get_storage_free_space() -> Result<u64> {
     Ok(free)
 }
 
-fn open_data_file() -> Mutex<File> {
-    const DATA_FILE_PATH: &str = "/storage/data.csv";
-    Mutex::new(
-        OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(DATA_FILE_PATH)
-            .unwrap_or_else(|_| panic!("failed to open file: {DATA_FILE_PATH}")),
-    )
-}
-fn open_settings_file() -> Mutex<File> {
-    const SETTINGS_FILE_PATH: &str = "/storage/setting.json";
-    Mutex::new(
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .create(true)
-            .open(SETTINGS_FILE_PATH)
-            .unwrap_or_else(|_| panic!("failed to open file: {SETTINGS_FILE_PATH}")),
-    )
-}
 struct LockedFile {
     locker: LazyLock<Mutex<File>>,
 }
 impl LockedFile {
-    //split to data and settings
-    pub const fn new(init: fn() -> Mutex<File>) -> LockedFile {
+    const DATA_FILE_PATH: &str = "/storage/data.csv";
+    pub const fn new_data() -> LockedFile {
         LockedFile {
-            locker: LazyLock::new(init),
+            locker: LazyLock::new(|| {
+                Mutex::new(
+                    OpenOptions::new()
+                        .read(true)
+                        .append(true)
+                        .create(true)
+                        .open(Self::DATA_FILE_PATH)
+                        .unwrap_or_else(|_| {
+                            panic!("failed to open file: {}", Self::DATA_FILE_PATH)
+                        }),
+                )
+            }),
+        }
+    }
+    const SETTINGS_FILE_PATH: &str = "/storage/setting.json";
+    pub const fn new_settings() -> LockedFile {
+        LockedFile {
+            locker: LazyLock::new(|| {
+                Mutex::new(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .truncate(false)
+                        .create(true)
+                        .open(Self::SETTINGS_FILE_PATH)
+                        .unwrap_or_else(|_| {
+                            panic!("failed to open file: {}", Self::SETTINGS_FILE_PATH)
+                        }),
+                )
+            }),
         }
     }
     fn lock(&self) -> Result<MutexGuard<'_, File>> {
@@ -136,8 +142,8 @@ impl LockedFile {
         Ok(s)
     }
 }
-static DATA_FILE: LockedFile = LockedFile::new(open_data_file);
-static SETTINGS_FILE: LockedFile = LockedFile::new(open_settings_file);
+static DATA_FILE: LockedFile = LockedFile::new_data();
+static SETTINGS_FILE: LockedFile = LockedFile::new_settings();
 
 fn reset_then_sleep(usec: u64) -> ! {
     unsafe { esp_deep_sleep(usec) }
@@ -376,7 +382,7 @@ fn record_measurements(i2c: &mut I2cDevices, v_cb: fn(f64)) -> Result<()> {
     let a = get_smoothed::<2>(i2c.read_ina219_a()?);
     let line = format!("{uptime_ms},{rtc_ts},{w:.2},{v:.2},{a:.3}");
     log::info!("{line}");
-    // append_data(&line)?;
+    // DATA_FILE.append_data(&line)?;
     v_cb(v);
     Ok(())
 }
