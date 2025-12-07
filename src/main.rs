@@ -464,6 +464,11 @@ fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
         rs.write(include_bytes!("../web/index.html"))?;
         AOk(())
     })?;
+    http_server.fn_handler("/restart", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        rs.write(b"restarting")?;
+        AOk(())
+    })?;
     http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         rs.write(format!("{}", uptime_usec()).as_bytes())?;
@@ -486,7 +491,7 @@ fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
     http_server.fn_handler("/clear_data", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         DATA_FILE.clear_data()?;
-        rs.write("cleared".as_bytes())?;
+        rs.write(b"cleared")?;
         AOk(())
     })?;
     http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
@@ -510,7 +515,7 @@ fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
         };
         let mut rs = rq.into_ok_response()?;
         SETTINGS_FILE.write_settings(s)?;
-        rs.write("Settings updated; Restarting".as_bytes())?;
+        rs.write(b"Settings updated; Restarting")?;
         restart();
         AOk(())
     })?;
