@@ -466,6 +466,7 @@ fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
 }
 
 fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
+    use embedded_svc::io::Read;
     let get_rtc_fn_i2c = i2c.clone();
     let set_rtc_fn_i2c = i2c.clone();
     let mut http_server = EspHttpServer::new(&HttpConf::default())?;
@@ -495,7 +496,6 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
         let (h, b) = rq.split();
         let clen = h.content_len().unwrap_or(0) as usize;
         let mut buf = vec![0u8; clen];
-        use embedded_svc::io::Read;
         b.read_exact(&mut buf)?;
         let dt = match serde_json::from_slice(&buf) {
             Ok(dt) => dt,
@@ -509,7 +509,6 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
         let mut i2c = lock_i2c(&set_rtc_fn_i2c)?;
         i2c.set_ds3231_rtc(&dt)?;
         rs.write(b"RTC updated")?;
-        restart();
         AOk(())
     })?;
     http_server.fn_handler("/get_data", HttpMethod::Get, |rq| {
@@ -543,7 +542,6 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
         let (h, b) = rq.split();
         let clen = h.content_len().unwrap_or(0) as usize;
         let mut buf = vec![0u8; clen];
-        use embedded_svc::io::Read;
         b.read_exact(&mut buf)?;
         let s = match serde_json::from_slice(&buf) {
             Ok(s) => s,

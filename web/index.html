@@ -25,10 +25,8 @@
             justify-content: center;
             align-items: stretch;
             background: #111827;
-            /* dark page background */
             color: #111827;
             font-size: 14px;
-            /* slightly smaller global size */
         }
 
         .app {
@@ -65,7 +63,6 @@
             color: #111827;
         }
 
-        /* NEW: stack for time / rtc / uptime */
         .uptime-stack {
             display: flex;
             flex-direction: column;
@@ -291,9 +288,7 @@
         .output {
             flex: 1 1 auto;
             min-height: 120px;
-            /* shorter pane */
             max-height: 40vh;
-            /* shorter max height */
             width: 100%;
             resize: vertical;
             padding: 0.5rem 0.6rem;
@@ -304,7 +299,6 @@
             font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono",
                 "Courier New", monospace;
             font-size: 0.6rem;
-            /* smaller text in lower pane */
             overflow: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -318,7 +312,6 @@
             <div class="header-top">
                 <div class="title">Console</div>
 
-                <!-- UPDATED: stack of current time, RTC, uptime -->
                 <div class="uptime-stack">
                     <div class="uptime-inline">
                         <strong>Local:</strong> <span id="current-time-text">—</span>
@@ -340,6 +333,10 @@
                 <a href="/clear_data" data-endpoint="/clear_data">
                     <span>Clear data</span>
                     <span class="path">/clear_data</span>
+                </a>
+                <a href="#" id="set-rtc-link">
+                    <span>Set RTC</span>
+                    <span class="path">/set_rtc</span>
                 </a>
                 <a href="/restart" data-endpoint="/restart">
                     <span>Restart</span>
@@ -390,17 +387,14 @@
         (function () {
             const outputEl = document.getElementById("output");
             const statusEl = document.getElementById("status-text");
-            const currentEndpointLabel = document.getElementById(
-                "current-endpoint-label"
-            );
+            const currentEndpointLabel = document.getElementById("current-endpoint-label");
             const copyBtn = document.getElementById("copy-btn");
-            const links = Array.from(
-                document.querySelectorAll("[data-endpoint]")
-            );
+            const links = Array.from(document.querySelectorAll("[data-endpoint]"));
 
             const uptimeTextEl = document.getElementById("uptime-text");
-            const currentTimeTextEl = document.getElementById("current-time-text"); // NEW
-            const rtcTextEl = document.getElementById("rtc-text");                 // NEW
+            const currentTimeTextEl = document.getElementById("current-time-text");
+            const rtcTextEl = document.getElementById("rtc-text");
+            const setRtcLink = document.getElementById("set-rtc-link");
 
             const settingsForm = document.getElementById("settings-form");
             const wifiSsidInput = document.getElementById("wifi-ssid");
@@ -578,7 +572,77 @@
                 }
             }
 
-            // UPDATED: also updates current time and polls /get_rtc every second
+            // NEW: send local time to /set_rtc as JSON
+            async function sendRtcFromLocalTime() {
+                const now = new Date();
+                const payload = {
+                    year: now.getFullYear(),
+                    month: now.getMonth() + 1,
+                    day: now.getDate(),
+                    hour: now.getHours(),
+                    minute: now.getMinutes(),
+                    second: now.getSeconds(),
+                };
+
+                setActiveLink(null);
+                currentEndpointLabel.textContent = "/set_rtc (POST)";
+                setStatus("Sending RTC…");
+                outputEl.textContent =
+                    "Request body:\n" + JSON.stringify(payload, null, 2) + "\n\nResponse:\n";
+
+                try {
+                    const response = await fetch("/set_rtc", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Accept:
+                                "application/json, text/plain;q=0.9, */*;q=0.8",
+                        },
+                        body: JSON.stringify(payload),
+                    });
+
+                    const contentType =
+                        (response.headers.get("content-type") || "").toLowerCase();
+
+                    let bodyText;
+                    if (contentType.includes("application/json")) {
+                        const data = await response.json();
+                        bodyText = JSON.stringify(data, null, 2);
+                    } else {
+                        bodyText = await response.text();
+                    }
+
+                    const sep = "\n----------------------------------------\n";
+                    if (!response.ok) {
+                        outputEl.textContent =
+                            "Request body:\n" +
+                            JSON.stringify(payload, null, 2) +
+                            sep +
+                            "Error " +
+                            response.status +
+                            " " +
+                            response.statusText +
+                            "\n\n" +
+                            bodyText;
+                        setStatus("Error");
+                    } else {
+                        outputEl.textContent =
+                            "Request body:\n" +
+                            JSON.stringify(payload, null, 2) +
+                            sep +
+                            (bodyText || "(empty response)");
+                        setStatus("OK (" + response.status + ")");
+                    }
+                } catch (err) {
+                    outputEl.textContent =
+                        "Request body:\n" +
+                        JSON.stringify(payload, null, 2) +
+                        "\n\nRequest failed:\n" +
+                        (err && err.message ? err.message : String(err));
+                    setStatus("Network / fetch error");
+                }
+            }
+
             function startUptimePolling() {
                 const poll = async () => {
                     // 1) Local time (formatted as YYYY-MM-DD HH:MM:SS)
@@ -598,7 +662,6 @@
                     } catch (_err) {
                         currentTimeTextEl.textContent = "—";
                     }
-
 
                     // 2) Uptime
                     try {
@@ -756,6 +819,13 @@
             copyBtn.addEventListener("click", function () {
                 copyOutputToClipboard();
             });
+
+            if (setRtcLink) {
+                setRtcLink.addEventListener("click", function (evt) {
+                    evt.preventDefault();
+                    sendRtcFromLocalTime();
+                });
+            }
 
             settingsForm.addEventListener("submit", sendSettings);
 
