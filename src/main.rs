@@ -38,6 +38,7 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -228,6 +229,7 @@ fn get_smoothed<const I: usize>(val: f64) -> f64 {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct RtcDateTime {
     year: u16,
     month: u8,
@@ -382,13 +384,13 @@ impl INA219 {
         AOk(if sv.is_sign_negative() { bv } else { sv + bv })
     }
 }
-struct I2cDevices<'a> {
-    i2c: I2cDriver<'a>,
+struct I2cDevices {
+    i2c: I2cDriver<'static>,
     ds3231: DS3231,
     ina219: INA219,
 }
-impl<'a> I2cDevices<'a> {
-    fn new(i2c: I2cDriver<'a>, ds3231: DS3231, ina219: INA219) -> Result<Self> {
+impl I2cDevices {
+    fn new(i2c: I2cDriver<'static>, ds3231: DS3231, ina219: INA219) -> Result<Self> {
         let mut s = Self {
             i2c,
             ds3231,
@@ -416,7 +418,13 @@ impl<'a> I2cDevices<'a> {
     }
 }
 
-fn record_measurements(i2c: &mut I2cDevices, v_cb: fn(f64)) -> Result<()> {
+fn lock_i2c(i2c: &Mutex<I2cDevices>) -> Result<MutexGuard<'_, I2cDevices>> {
+    i2c.lock()
+        .map_err(|e| anyhow::anyhow!("i2c lock error: {e}"))
+}
+
+fn record_measurements(i2c: &Mutex<I2cDevices>, v_cb: fn(f64)) -> Result<()> {
+    let mut i2c = lock_i2c(i2c)?;
     let uptime_ms = uptime_usec() / 1000;
     let rtc_ts = i2c.read_ds3231_rtc_str()?;
     let w = get_smoothed::<0>(i2c.read_ina219_w()?);
@@ -457,7 +465,9 @@ fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
     AOk(wifi)
 }
 
-fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
+fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
+    let get_rtc_fn_i2c = i2c.clone();
+    let set_rtc_fn_i2c = i2c.clone();
     let mut http_server = EspHttpServer::new(&HttpConf::default())?;
     http_server.fn_handler("/", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
@@ -467,11 +477,39 @@ fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
     http_server.fn_handler("/restart", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         rs.write(b"restarting")?;
+        restart();
         AOk(())
     })?;
     http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         rs.write(format!("{}", uptime_usec()).as_bytes())?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/get_rtc", HttpMethod::Get, move |rq| {
+        let mut rs = rq.into_ok_response()?;
+        let mut i2c = lock_i2c(&get_rtc_fn_i2c)?;
+        rs.write(i2c.read_ds3231_rtc_str()?.as_bytes())?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/set_rtc", HttpMethod::Post, move |mut rq| {
+        let (h, b) = rq.split();
+        let clen = h.content_len().unwrap_or(0) as usize;
+        let mut buf = vec![0u8; clen];
+        use embedded_svc::io::Read;
+        b.read_exact(&mut buf)?;
+        let dt = match serde_json::from_slice(&buf) {
+            Ok(dt) => dt,
+            Err(e) => {
+                let mut rs = rq.into_response(400, Some("Bad Request"), &[])?;
+                rs.write(format!("Invalid JSON: {e}").as_bytes())?;
+                return AOk(());
+            }
+        };
+        let mut rs = rq.into_ok_response()?;
+        let mut i2c = lock_i2c(&set_rtc_fn_i2c)?;
+        i2c.set_ds3231_rtc(&dt)?;
+        rs.write(b"RTC updated")?;
+        restart();
         AOk(())
     })?;
     http_server.fn_handler("/get_data", HttpMethod::Get, |rq| {
@@ -496,13 +534,15 @@ fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
     })?;
     http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
-        rs.write(SETTINGS_FILE.read_all_to_string()?.as_bytes())?;
+        let s = SETTINGS_FILE.read_settings()?;
+        let s = serde_json::to_string(&s)?;
+        rs.write(s.as_bytes())?;
         AOk(())
     })?;
     http_server.fn_handler("/set_settings", HttpMethod::Post, |mut rq| {
         let (h, b) = rq.split();
-        let content_len = h.content_len().unwrap_or(0) as usize;
-        let mut buf = vec![0u8; content_len];
+        let clen = h.content_len().unwrap_or(0) as usize;
+        let mut buf = vec![0u8; clen];
         use embedded_svc::io::Read;
         b.read_exact(&mut buf)?;
         let s = match serde_json::from_slice(&buf) {
@@ -532,7 +572,7 @@ fn main() -> Result<()> {
     feed_watchdog();
     mount_storage()?;
     let peripherals = Peripherals::take()?;
-    let mut i2c = I2cDevices::new(
+    let i2c = I2cDevices::new(
         I2cDriver::new(
             peripherals.i2c0,
             peripherals.pins.gpio4,
@@ -542,6 +582,7 @@ fn main() -> Result<()> {
         DS3231::new(0x68),
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
+    let i2c = Arc::new(Mutex::new(i2c));
     let low_v_cb = |v| {
         if v <= LOW_V {
             reset_then_sleep(LOW_V_SLEEP_USEC.into());
@@ -549,19 +590,19 @@ fn main() -> Result<()> {
     };
 
     if woke_from_sleep() {
-        record_measurements(&mut i2c, low_v_cb)?;
+        record_measurements(&i2c, low_v_cb)?;
         reset_then_sleep(RECORD_SLEEP_USEC.into());
     }
 
     let _wifi = setup_wifi(peripherals.modem)?;
-    let _http = setup_http()?;
+    let _http = setup_http(i2c.clone())?;
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
     loop {
         feed_watchdog();
         if let Err(e) = led.set_low() {
             log::warn!("led on error: {e}");
         }
-        if let Err(e) = record_measurements(&mut i2c, low_v_cb) {
+        if let Err(e) = record_measurements(&i2c, low_v_cb) {
             log::error!("record_measurements error: {e}");
         }
         if let Err(e) = led.set_high() {
