@@ -1,10 +1,8 @@
-#![expect(dead_code)]
 use anyhow::Ok as AOk;
 use anyhow::Result;
 use embedded_svc::http::Headers;
 use embedded_svc::http::Method as HttpMethod;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
 use esp_idf_svc::hal::gpio::PinDriver;
@@ -38,10 +36,15 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::thread::sleep;
+use std::time::Duration;
+use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -311,8 +314,8 @@ impl DS3231 {
 struct INA219 {
     addr: u8,
     timeout: TickType_t,
-    r_shunt: f64,              // Ω
-    max_expected_current: f64, // A
+    _r_shunt: f64,              // Ω
+    _max_expected_current: f64, // A
     current_lsb: f64,
     power_lsb: f64,
     calibration: u16,
@@ -333,8 +336,8 @@ impl INA219 {
         Self {
             addr,
             timeout: TickType::new_millis(100).0,
-            r_shunt,
-            max_expected_current,
+            _r_shunt: r_shunt,
+            _max_expected_current: max_expected_current,
             current_lsb,
             power_lsb: 20_f64 * current_lsb,
             calibration: (Self::INTERNAL_FIXED_VALUE / (current_lsb * r_shunt)) as u16,
@@ -422,7 +425,6 @@ fn lock_i2c(i2c: &Mutex<I2cDevices>) -> Result<MutexGuard<'_, I2cDevices>> {
     i2c.lock()
         .map_err(|e| anyhow::anyhow!("i2c lock error: {e}"))
 }
-
 fn record_measurements(i2c: &Mutex<I2cDevices>, v_cb: fn(f64)) -> Result<()> {
     let mut i2c = lock_i2c(i2c)?;
     let uptime_ms = uptime_usec() / 1000;
@@ -436,7 +438,6 @@ fn record_measurements(i2c: &Mutex<I2cDevices>, v_cb: fn(f64)) -> Result<()> {
     v_cb(v);
     AOk(())
 }
-
 fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
@@ -464,26 +465,29 @@ fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
     wifi.start()?;
     AOk(wifi)
 }
-
-fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
+fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHttpServer<'a>> {
     use embedded_svc::io::Read;
     let get_rtc_fn_i2c = i2c.clone();
     let set_rtc_fn_i2c = i2c.clone();
+    let restart_fn_tx = tx.clone();
+    let set_settings_fn_tx = tx.clone();
+    let get_uptime_usec_fn_tx = tx.clone();
     let mut http_server = EspHttpServer::new(&HttpConf::default())?;
     http_server.fn_handler("/", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         rs.write(include_bytes!("../web/index.html"))?;
         AOk(())
     })?;
-    http_server.fn_handler("/restart", HttpMethod::Get, |rq| {
+    http_server.fn_handler("/restart", HttpMethod::Get, move |rq| {
         let mut rs = rq.into_ok_response()?;
-        rs.write(b"restarting")?;
-        restart();
+        rs.write(b"Restarting")?;
+        restart_fn_tx.send(Msg::Restart)?;
         AOk(())
     })?;
-    http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, |rq| {
+    http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, move |rq| {
         let mut rs = rq.into_ok_response()?;
-        rs.write(format!("{}", uptime_usec()).as_bytes())?;
+        rs.write(uptime_usec().to_string().as_bytes())?;
+        get_uptime_usec_fn_tx.send(Msg::KeepAlive)?;
         AOk(())
     })?;
     http_server.fn_handler("/get_rtc", HttpMethod::Get, move |rq| {
@@ -528,7 +532,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
     http_server.fn_handler("/clear_data", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
         DATA_FILE.clear_data()?;
-        rs.write(b"cleared")?;
+        rs.write(b"Cleared data")?;
         AOk(())
     })?;
     http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
@@ -538,7 +542,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
         rs.write(s.as_bytes())?;
         AOk(())
     })?;
-    http_server.fn_handler("/set_settings", HttpMethod::Post, |mut rq| {
+    http_server.fn_handler("/set_settings", HttpMethod::Post, move |mut rq| {
         let (h, b) = rq.split();
         let clen = h.content_len().unwrap_or(0) as usize;
         let mut buf = vec![0u8; clen];
@@ -554,16 +558,20 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>) -> Result<EspHttpServer<'a>> {
         let mut rs = rq.into_ok_response()?;
         SETTINGS_FILE.write_settings(s)?;
         rs.write(b"Settings updated; Restarting")?;
-        restart();
+        set_settings_fn_tx.send(Msg::Restart)?;
         AOk(())
     })?;
     AOk(http_server)
 }
-
+enum Msg {
+    Restart,
+    KeepAlive,
+}
 fn main() -> Result<()> {
     const LOW_V: f64 = 12.2;
-    const LOW_V_SLEEP_USEC: u32 = 60 * 1000 * 1000;
-    const RECORD_SLEEP_USEC: u32 = 10 * 1000 * 1000;
+    const LOW_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
+    const RECORD_SLEEP_USEC: u64 = 10 * 1000 * 1000;
+    const HIGH_POWER_MODE_MIN_DUR: Duration = Duration::from_secs(30);
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -575,7 +583,7 @@ fn main() -> Result<()> {
             peripherals.i2c0,
             peripherals.pins.gpio4,
             peripherals.pins.gpio3,
-            &I2cConfig::new().baudrate(400.kHz().into()), //TODO 100?
+            &I2cConfig::new().baudrate(400.kHz().into()),
         )?,
         DS3231::new(0x68),
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
@@ -583,17 +591,19 @@ fn main() -> Result<()> {
     let i2c = Arc::new(Mutex::new(i2c));
     let low_v_cb = |v| {
         if v <= LOW_V {
-            reset_then_sleep(LOW_V_SLEEP_USEC.into());
+            reset_then_sleep(LOW_V_SLEEP_USEC);
         }
     };
 
     if woke_from_sleep() {
         record_measurements(&i2c, low_v_cb)?;
-        reset_then_sleep(RECORD_SLEEP_USEC.into());
+        reset_then_sleep(RECORD_SLEEP_USEC);
     }
 
+    let mut start_high_power_mode = SystemTime::now();
+    let (tx, rx) = channel();
     let _wifi = setup_wifi(peripherals.modem)?;
-    let _http = setup_http(i2c.clone())?;
+    let _http = setup_http(i2c.clone(), tx)?;
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
     loop {
         feed_watchdog();
@@ -606,6 +616,19 @@ fn main() -> Result<()> {
         if let Err(e) = led.set_high() {
             log::warn!("led off error: {e}");
         }
-        FreeRtos::delay_ms(RECORD_SLEEP_USEC / 1000); // switch to use std::thread::sleep;use std::time::Duration;sleep(Duration::from_micros(SLEEP_USEC)); at end
+        while let Ok(v) = rx.try_recv() {
+            match v {
+                Msg::Restart => {
+                    restart();
+                }
+                Msg::KeepAlive => {
+                    start_high_power_mode = SystemTime::now();
+                }
+            }
+        }
+        if start_high_power_mode.elapsed()? >= HIGH_POWER_MODE_MIN_DUR {
+            reset_then_sleep(RECORD_SLEEP_USEC);
+        }
+        sleep(Duration::from_micros(RECORD_SLEEP_USEC));
     }
 }
