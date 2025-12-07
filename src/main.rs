@@ -1,20 +1,23 @@
 #![expect(dead_code)]
-use anyhow::Ok;
+use anyhow::Ok as AOk;
 use anyhow::Result;
+use embedded_svc::http::Headers;
 use embedded_svc::http::Method as HttpMethod;
-use esp_idf_hal::delay::TickType;
-use esp_idf_hal::delay::TickType_t;
-use esp_idf_hal::units::FromValueType;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::FreeRtos;
+use esp_idf_svc::hal::delay::TickType;
+use esp_idf_svc::hal::delay::TickType_t;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
+use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::http::server::Configuration as HttpConf;
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::esp_deep_sleep;
+use esp_idf_svc::sys::esp_restart;
 use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
 use esp_idf_svc::sys::esp_timer_get_time;
 use esp_idf_svc::sys::esp_vfs_fat_info;
@@ -27,6 +30,8 @@ use esp_idf_svc::wifi::AuthMethod;
 use esp_idf_svc::wifi::Configuration as WiFiConf;
 use esp_idf_svc::wifi::EspWifi;
 use esp_idf_svc::wifi::Protocol;
+use serde::Deserialize;
+use serde::Serialize;
 use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -36,6 +41,21 @@ use std::io::Write;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    wifi_pass: String,
+    wifi_ssid: String,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            wifi_pass: "kspass1234".to_string(),
+            wifi_ssid: "ESP2".to_string(),
+        }
+    }
+}
+impl Settings {}
 
 const STOR_PATH: &CStr = c"/storage";
 fn mount_storage() -> Result<()> {
@@ -59,7 +79,7 @@ fn mount_storage() -> Result<()> {
     if res != 0 {
         anyhow::bail!("esp_vfs_fat_spiflash_mount_rw_wl failed; esp_err_t = {res}");
     }
-    Ok(())
+    AOk(())
 }
 fn get_storage_free_space() -> Result<u64> {
     let mut total = 0;
@@ -68,7 +88,7 @@ fn get_storage_free_space() -> Result<u64> {
     if res != 0 {
         anyhow::bail!("esp_vfs_fat_info failed; esp_err_t = {res}");
     }
-    Ok(free)
+    AOk(free)
 }
 
 struct LockedFile {
@@ -92,7 +112,7 @@ impl LockedFile {
             }),
         }
     }
-    const SETTINGS_FILE_PATH: &str = "/storage/setting.json";
+    const SETTINGS_FILE_PATH: &str = "/storage/settings.jsn";
     pub const fn new_settings() -> LockedFile {
         LockedFile {
             locker: LazyLock::new(|| {
@@ -119,7 +139,7 @@ impl LockedFile {
         const STOR_MIN_FREE: u64 = 512 * 1024;
         if get_storage_free_space()? < STOR_MIN_FREE {
             log::warn!("append_data canceled due to lack of minimum free space");
-            return Ok(());
+            return AOk(());
         }
         let mut f = self.lock()?;
         if f.metadata()?.len() == 0 {
@@ -127,20 +147,36 @@ impl LockedFile {
         }
         writeln!(f, "{d}")?;
         f.sync_all()?;
-        Ok(())
+        AOk(())
     }
     fn clear_data(&self) -> Result<()> {
         let f = self.lock()?;
         f.set_len(0)?;
         f.sync_all()?;
-        Ok(())
+        AOk(())
     }
-    fn read_data(&self) -> Result<String> {
+    fn read_all_to_string(&self) -> Result<String> {
         let mut f = self.lock()?;
         f.rewind()?;
         let mut s = String::new();
         f.read_to_string(&mut s)?;
-        Ok(s)
+        AOk(s)
+    }
+    fn read_settings(&self) -> Result<Settings> {
+        let s = self.read_all_to_string()?;
+        if s.is_empty() {
+            AOk(Settings::default())
+        } else {
+            serde_json::from_str(&s).map_err(|e| anyhow::anyhow!("parse error: {e}"))
+        }
+    }
+    fn write_settings(&self, s: Settings) -> Result<()> {
+        let s = serde_json::to_string(&s)?;
+        self.clear_data()?;
+        let mut f = self.lock()?;
+        write!(f, "{s}")?;
+        f.sync_all()?;
+        AOk(())
     }
 }
 static DATA_FILE: LockedFile = LockedFile::new_data();
@@ -161,6 +197,11 @@ fn uptime_usec() -> i64 {
 fn feed_watchdog() {
     unsafe {
         feed_rtc_wdt();
+    }
+}
+fn restart() {
+    unsafe {
+        esp_restart();
     }
 }
 
@@ -237,7 +278,7 @@ impl DS3231 {
             Self::dec_to_bcd(year),
         ];
         i2c.write(self.addr, &data, self.timeout)?;
-        Ok(())
+        AOk(())
     }
     fn read_rtc(&mut self, i2c: &mut I2cDriver) -> Result<RtcDateTime> {
         i2c.write(self.addr, &[0x00], self.timeout)?;
@@ -249,7 +290,7 @@ impl DS3231 {
         let day = Self::bcd_to_dec(buf[4]);
         let month = Self::bcd_to_dec(buf[5] & 0x1F);
         let year = 2000 + Self::bcd_to_dec(buf[6]) as u16;
-        Ok(RtcDateTime::new(year, month, day, hour, minute, second))
+        AOk(RtcDateTime::new(year, month, day, hour, minute, second))
     }
     fn read_rtc_str(&mut self, i2c: &mut I2cDriver) -> Result<String> {
         let RtcDateTime {
@@ -260,7 +301,7 @@ impl DS3231 {
             minute,
             second,
         } = self.read_rtc(i2c)?;
-        Ok(format!(
+        AOk(format!(
             "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
         ))
     }
@@ -302,7 +343,7 @@ impl INA219 {
         i2c.write(self.addr, &[reg], self.timeout)?;
         let mut buf = [0u8; 2];
         i2c.read(self.addr, &mut buf, self.timeout)?;
-        Ok(u16::from_be_bytes(buf))
+        AOk(u16::from_be_bytes(buf))
     }
     fn read_i16(&mut self, i2c: &mut I2cDriver, reg: u8) -> Result<i16> {
         self.read_u16(i2c, reg).map(|v| v as i16)
@@ -311,7 +352,7 @@ impl INA219 {
         let mut buf = [reg, 0, 0];
         buf[1..].copy_from_slice(&v.to_be_bytes());
         i2c.write(self.addr, &buf, self.timeout)?;
-        Ok(())
+        AOk(())
     }
     fn write_conf(&mut self, i2c: &mut I2cDriver) -> Result<()> {
         self.write_u16(i2c, Self::REG_CONF, self.conf)
@@ -338,7 +379,7 @@ impl INA219 {
     fn read_v(&mut self, i2c: &mut I2cDriver) -> Result<f64> {
         let sv = self.read_shunt_v(i2c)?;
         let bv = self.read_bus_v(i2c)?;
-        Ok(if sv.is_sign_negative() { bv } else { sv + bv })
+        AOk(if sv.is_sign_negative() { bv } else { sv + bv })
     }
 }
 struct I2cDevices<'a> {
@@ -356,7 +397,7 @@ impl<'a> I2cDevices<'a> {
         let i2c = &mut s.i2c;
         s.ina219.write_conf(i2c)?;
         s.ina219.write_calibration(i2c)?;
-        Ok(s)
+        AOk(s)
     }
     fn set_ds3231_rtc(&mut self, dt: &RtcDateTime) -> Result<()> {
         self.ds3231.set_rtc(&mut self.i2c, dt)
@@ -383,15 +424,103 @@ fn record_measurements(i2c: &mut I2cDevices, v_cb: fn(f64)) -> Result<()> {
     let a = get_smoothed::<2>(i2c.read_ina219_a()?);
     let line = format!("{uptime_ms},{rtc_ts},{w:.2},{v:.2},{a:.3}");
     log::info!("{line}");
-    // DATA_FILE.append_data(&line)?;
+    DATA_FILE.append_data(&line)?;
     v_cb(v);
-    Ok(())
+    AOk(())
+}
+
+fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
+    let sys_loop = EspSystemEventLoop::take()?;
+    let nvs = EspDefaultNvsPartition::take()?;
+    let mut wifi = EspWifi::new(modem, sys_loop, Some(nvs))?;
+    let s = SETTINGS_FILE.read_settings()?;
+    let conf = WiFiConf::AccessPoint(AccessPointConfiguration {
+        ssid: s
+            .wifi_ssid
+            .as_str()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("ssid error"))?,
+        ssid_hidden: false,
+        channel: 1,
+        secondary_channel: None,
+        protocols: Protocol::P802D11BGN.into(),
+        auth_method: AuthMethod::WPA2Personal,
+        password: s
+            .wifi_pass
+            .as_str()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("password error"))?,
+        max_connections: 10,
+    });
+    wifi.set_configuration(&conf)?;
+    wifi.start()?;
+    AOk(wifi)
+}
+
+fn setup_http<'a>() -> Result<EspHttpServer<'a>> {
+    let mut http_server = EspHttpServer::new(&HttpConf::default())?;
+    http_server.fn_handler("/", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        rs.write(include_bytes!("../web/index.html"))?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        rs.write(format!("{}", uptime_usec()).as_bytes())?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/get_data", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "text/plain")])?;
+        let mut buf = vec![0; 64 * 1024];
+        let mut f = DATA_FILE.lock()?;
+        f.rewind()?;
+        loop {
+            let bytes_read = f.read(&mut buf)?;
+            if bytes_read == 0 {
+                break;
+            }
+            rs.write(&buf[0..bytes_read])?;
+        }
+        AOk(())
+    })?;
+    http_server.fn_handler("/clear_data", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        DATA_FILE.clear_data()?;
+        rs.write("cleared".as_bytes())?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
+        let mut rs = rq.into_ok_response()?;
+        rs.write(SETTINGS_FILE.read_all_to_string()?.as_bytes())?;
+        AOk(())
+    })?;
+    http_server.fn_handler("/set_settings", HttpMethod::Post, |mut rq| {
+        let (h, b) = rq.split();
+        let content_len = h.content_len().unwrap_or(0) as usize;
+        let mut buf = vec![0u8; content_len];
+        use embedded_svc::io::Read;
+        b.read_exact(&mut buf)?;
+        let s = match serde_json::from_slice(&buf) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut rs = rq.into_response(400, Some("Bad Request"), &[])?;
+                rs.write(format!("Invalid JSON: {e}").as_bytes())?;
+                return AOk(());
+            }
+        };
+        let mut rs = rq.into_ok_response()?;
+        SETTINGS_FILE.write_settings(s)?;
+        rs.write("Settings updated; Restarting".as_bytes())?;
+        restart();
+        AOk(())
+    })?;
+    AOk(http_server)
 }
 
 fn main() -> Result<()> {
     const LOW_V: f64 = 12.2;
     const LOW_V_SLEEP_USEC: u32 = 60 * 1000 * 1000;
-    const RECORD_SLEEP_USEC: u32 = 2 * 1000 * 1000;
+    const RECORD_SLEEP_USEC: u32 = 10 * 1000 * 1000;
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -419,32 +548,9 @@ fn main() -> Result<()> {
         reset_then_sleep(RECORD_SLEEP_USEC.into());
     }
 
+    let _wifi = setup_wifi(peripherals.modem)?;
+    let _http = setup_http()?;
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
-    let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
-    let mut wifi = EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?;
-    let conf = WiFiConf::AccessPoint(AccessPointConfiguration {
-        ssid: "ESP2"
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("ssid error"))?,
-        ssid_hidden: false,
-        channel: 1,
-        secondary_channel: None,
-        protocols: Protocol::P802D11BGN.into(),
-        auth_method: AuthMethod::WPA2Personal,
-        password: "kspass1234"
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("password error"))?,
-        max_connections: 10,
-    });
-    wifi.set_configuration(&conf)?;
-    wifi.start()?;
-    let mut http_server = EspHttpServer::new(&HttpConf::default())?;
-    http_server.fn_handler("/", HttpMethod::Get, |rq| {
-        let mut rs = rq.into_ok_response()?;
-        rs.write(format!("ts {}", uptime_usec()).as_bytes())?;
-        Ok(())
-    })?;
     loop {
         feed_watchdog();
         if let Err(e) = led.set_low() {
