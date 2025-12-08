@@ -571,7 +571,7 @@ fn main() -> Result<()> {
     const LOW_V: f64 = 12.2;
     const LOW_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
     const RECORD_SLEEP_USEC: u64 = 10 * 1000 * 1000;
-    const HIGH_POWER_MODE_MIN_DUR: Duration = Duration::from_secs(30);
+    const HIGH_POWER_MODE_DUR: Duration = Duration::from_mins(2);
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -626,7 +626,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if start_high_power_mode.elapsed()? >= HIGH_POWER_MODE_MIN_DUR {
+        if start_high_power_mode.elapsed()? >= HIGH_POWER_MODE_DUR {
             reset_then_sleep(RECORD_SLEEP_USEC);
         }
         sleep(Duration::from_micros(RECORD_SLEEP_USEC));
