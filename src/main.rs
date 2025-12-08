@@ -425,7 +425,7 @@ fn lock_i2c(i2c: &Mutex<I2cDevices>) -> Result<MutexGuard<'_, I2cDevices>> {
     i2c.lock()
         .map_err(|e| anyhow::anyhow!("i2c lock error: {e}"))
 }
-fn record_measurements(i2c: &Mutex<I2cDevices>, v_cb: fn(f64)) -> Result<()> {
+fn record_measurements(i2c: &Mutex<I2cDevices>) -> Result<f64> {
     let mut i2c = lock_i2c(i2c)?;
     let uptime_ms = uptime_usec() / 1000;
     let rtc_ts = i2c.read_ds3231_rtc_str()?;
@@ -435,8 +435,7 @@ fn record_measurements(i2c: &Mutex<I2cDevices>, v_cb: fn(f64)) -> Result<()> {
     let line = format!("{uptime_ms},{rtc_ts},{w:.2},{v:.2},{a:.3}");
     log::info!("{line}");
     DATA_FILE.append_data(&line)?;
-    v_cb(v);
-    AOk(())
+    AOk(v)
 }
 fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
     let sys_loop = EspSystemEventLoop::take()?;
@@ -568,10 +567,15 @@ enum Msg {
     KeepAlive,
 }
 fn main() -> Result<()> {
-    const LOW_V: f64 = 12.2;
-    const LOW_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
+    const HI_V: f64 = 13.0;
+    const LO_V: f64 = 12.2;
+    const LO_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
     const RECORD_SLEEP_USEC: u64 = 10 * 1000 * 1000;
-    const HIGH_POWER_MODE_DUR: Duration = Duration::from_mins(2);
+    const RECORD_SLEEP_DUR: Duration = Duration::from_micros(RECORD_SLEEP_USEC);
+    const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
+    let short_sleep = || sleep(RECORD_SLEEP_DUR);
+    let short_reset_sleep = || reset_then_sleep(RECORD_SLEEP_USEC);
+    let long_reset_sleep = || reset_then_sleep(LO_V_SLEEP_USEC);
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -589,18 +593,19 @@ fn main() -> Result<()> {
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
     let i2c = Arc::new(Mutex::new(i2c));
-    let low_v_cb = |v| {
-        if v <= LOW_V {
-            reset_then_sleep(LOW_V_SLEEP_USEC);
-        }
-    };
 
     if woke_from_sleep() {
-        record_measurements(&i2c, low_v_cb)?;
-        reset_then_sleep(RECORD_SLEEP_USEC);
+        match record_measurements(&i2c) {
+            Ok(v) => match v {
+                v if v <= LO_V => long_reset_sleep(),
+                v if v >= HI_V => short_sleep(),
+                _ => short_reset_sleep(),
+            },
+            Err(e) => log::error!("record_measurements error: {e}"),
+        }
     }
 
-    let mut start_high_power_mode = SystemTime::now();
+    let mut hi_power_mode_timer = SystemTime::now();
     let (tx, rx) = channel();
     let _wifi = setup_wifi(peripherals.modem)?;
     let _http = setup_http(i2c.clone(), tx)?;
@@ -610,8 +615,13 @@ fn main() -> Result<()> {
         if let Err(e) = led.set_low() {
             log::warn!("led on error: {e}");
         }
-        if let Err(e) = record_measurements(&i2c, low_v_cb) {
-            log::error!("record_measurements error: {e}");
+        match record_measurements(&i2c) {
+            Ok(v) => match v {
+                v if v <= LO_V => long_reset_sleep(),
+                v if v >= HI_V => hi_power_mode_timer = SystemTime::now(),
+                _ => {}
+            },
+            Err(e) => log::error!("record_measurements error: {e}"),
         }
         if let Err(e) = led.set_high() {
             log::warn!("led off error: {e}");
@@ -622,13 +632,13 @@ fn main() -> Result<()> {
                     restart();
                 }
                 Msg::KeepAlive => {
-                    start_high_power_mode = SystemTime::now();
+                    hi_power_mode_timer = SystemTime::now();
                 }
             }
         }
-        if start_high_power_mode.elapsed()? >= HIGH_POWER_MODE_DUR {
-            reset_then_sleep(RECORD_SLEEP_USEC);
+        if hi_power_mode_timer.elapsed()? >= HI_POWER_MODE_DUR {
+            short_reset_sleep();
         }
-        sleep(Duration::from_micros(RECORD_SLEEP_USEC));
+        short_sleep();
     }
 }
