@@ -601,7 +601,10 @@ fn main() -> Result<()> {
                 v if v >= HI_V => short_sleep(),
                 _ => short_reset_sleep(),
             },
-            Err(e) => log::error!("record_measurements error: {e}"),
+            Err(e) => {
+                log::error!("record_measurements error: {e}");
+                long_reset_sleep();
+            }
         }
     }
 
