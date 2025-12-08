@@ -416,7 +416,7 @@
             async function callEndpoint(path, linkEl) {
                 setActiveLink(linkEl);
                 currentEndpointLabel.textContent = path + " (GET)";
-                setStatus("Requesting…");
+                setStatus("…");
                 outputEl.textContent = "";
                 try {
                     const response = await fetch(path, {
@@ -449,6 +449,7 @@
                         setStatus("Error");
                     } else {
                         outputEl.textContent = bodyText || "(empty response)";
+                        outputEl.scrollTop = outputEl.scrollHeight;
                         setStatus("OK (" + response.status + ")");
                     }
                 } catch (err) {
