@@ -59,7 +59,6 @@ impl Default for Settings {
         }
     }
 }
-impl Settings {}
 
 const STOR_PATH: &CStr = c"/storage";
 fn mount_storage() -> Result<()> {
