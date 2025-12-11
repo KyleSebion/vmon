@@ -146,7 +146,7 @@ impl LockedFile {
         }
         let mut f = self.lock()?;
         if f.metadata()?.len() == 0 {
-            writeln!(f, "uptime_ms,rtc_ts,w,v,a")?;
+            writeln!(f, "rtc_ts,w,v,a,uptime_ms")?;
         }
         writeln!(f, "{d}")?;
         f.sync_all()?;
@@ -431,7 +431,7 @@ fn record_measurements(i2c: &Mutex<I2cDevices>) -> Result<f64> {
     let w = get_smoothed::<0>(i2c.read_ina219_w()?);
     let v = get_smoothed::<1>(i2c.read_ina219_v()?);
     let a = get_smoothed::<2>(i2c.read_ina219_a()?);
-    let line = format!("{uptime_ms},{rtc_ts},{w:.2},{v:.2},{a:.3}");
+    let line = format!("{rtc_ts},{w:.2},{v:.2},{a:.3},{uptime_ms}");
     log::info!("{line}");
     DATA_FILE.append_data(&line)?;
     AOk(v)
