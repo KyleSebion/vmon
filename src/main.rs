@@ -84,16 +84,25 @@ fn mount_storage() -> Result<()> {
     }
     AOk(())
 }
-fn get_storage_free_space() -> Result<u64> {
-    let mut total = 0;
-    let mut free = 0;
-    let res = unsafe { esp_vfs_fat_info(STOR_PATH.as_ptr(), &mut total, &mut free) };
+#[derive(Serialize, Deserialize)]
+struct StorageSpaceInfo {
+    total: u64,
+    free: u64,
+    min_allowed_free: u64,
+}
+const STOR_MIN_FREE: u64 = 512 * 1024;
+fn get_storage_space_info() -> Result<StorageSpaceInfo> {
+    let mut i = StorageSpaceInfo {
+        total: 0,
+        free: 0,
+        min_allowed_free: STOR_MIN_FREE,
+    };
+    let res = unsafe { esp_vfs_fat_info(STOR_PATH.as_ptr(), &mut i.total, &mut i.free) };
     if res != 0 {
         anyhow::bail!("esp_vfs_fat_info failed; esp_err_t = {res}");
     }
-    AOk(free)
+    AOk(i)
 }
-
 struct LockedFile {
     locker: LazyLock<Mutex<File>>,
 }
@@ -139,8 +148,8 @@ impl LockedFile {
             .map_err(|e| anyhow::anyhow!("lock error: {e}"))
     }
     fn append_data(&self, d: &str) -> Result<()> {
-        const STOR_MIN_FREE: u64 = 512 * 1024;
-        if get_storage_free_space()? < STOR_MIN_FREE {
+        let i = get_storage_space_info()?;
+        if i.free < i.min_allowed_free {
             log::warn!("append_data canceled due to lack of minimum free space");
             return AOk(());
         }
@@ -488,6 +497,13 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
         get_uptime_usec_fn_tx.send(Msg::KeepAlive)?;
         AOk(())
     })?;
+    http_server.fn_handler("/get_space_info", HttpMethod::Get, move |rq| {
+        let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
+        let i = get_storage_space_info()?;
+        let i = serde_json::to_string(&i)?;
+        rs.write(i.as_bytes())?;
+        AOk(())
+    })?;
     http_server.fn_handler("/get_rtc", HttpMethod::Get, move |rq| {
         let mut rs = rq.into_ok_response()?;
         let mut i2c = lock_i2c(&get_rtc_fn_i2c)?;
@@ -534,7 +550,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
         AOk(())
     })?;
     http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
-        let mut rs = rq.into_ok_response()?;
+        let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
         let s = SETTINGS_FILE.read_settings()?;
         let s = serde_json::to_string(&s)?;
         rs.write(s.as_bytes())?;

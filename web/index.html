@@ -321,6 +321,9 @@
                     <div class="uptime-inline">
                         <strong>Uptime:</strong> <span id="uptime-text">—</span>
                     </div>
+                    <div class="uptime-inline">
+                        <strong>Free:</strong> <span id="space-text">—</span>
+                    </div>
                 </div>
             </div>
 
@@ -391,6 +394,7 @@
             const links = Array.from(document.querySelectorAll("[data-endpoint]"));
 
             const uptimeTextEl = document.getElementById("uptime-text");
+            const spaceTextEl = document.getElementById("space-text");
             const currentTimeTextEl = document.getElementById("current-time-text");
             const rtcTextEl = document.getElementById("rtc-text");
             const setRtcLink = document.getElementById("set-rtc-link");
@@ -758,6 +762,52 @@
                         }
                     } catch (_err) {
                         rtcTextEl.textContent = "err";
+                    }
+
+                    // 4) Space Info
+                    try {
+                        const siResponse = await fetch("/get_space_info", {
+                            method: "GET",
+                            cache: "no-store",
+                            headers: {
+                                Accept:
+                                    "application/json, text/plain;q=0.9, */*;q=0.8",
+                            },
+                        });
+
+                        const contentTypeSi =
+                            (siResponse.headers.get("content-type") || "").toLowerCase();
+
+                        let si = null;
+
+                        if (contentTypeSi.includes("application/json")) {
+                            const data = await siResponse.json();
+                            if (
+                                data &&
+                                typeof data === "object" &&
+                                "min_allowed_free" in data
+                            ) {
+                                const space_total = data.total - data.min_allowed_free;
+                                const space_free = data.free - data.min_allowed_free;
+                                si = (space_free / space_total * 100).toFixed(1) + "%";
+                            } else {
+                                si = JSON.stringify(data);
+                            }
+                        } else {
+                            const rawText = await response.text();
+                            const trimmed = rawText.trim();
+                            si = trimmed;
+                        }
+
+                        if (!siResponse.ok) {
+                            spaceTextEl.textContent = "error";
+                        } else if (si != null) {
+                            spaceTextEl.textContent = si;
+                        } else {
+                            spaceTextEl.textContent = "—";
+                        }
+                    } catch (_err) {
+                        spaceTextEl.textContent = "err";
                     }
                 };
 
