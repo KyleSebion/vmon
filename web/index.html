@@ -649,24 +649,6 @@
 
             function startUptimePolling() {
                 const poll = async () => {
-                    // 1) Local time (formatted as YYYY-MM-DD HH:MM:SS)
-                    try {
-                        const now = new Date();
-
-                        const year = now.getFullYear();
-                        const month = String(now.getMonth() + 1).padStart(2, "0");
-                        const day = String(now.getDate()).padStart(2, "0");
-                        const hour = String(now.getHours()).padStart(2, "0");
-                        const minute = String(now.getMinutes()).padStart(2, "0");
-                        const second = String(now.getSeconds()).padStart(2, "0");
-
-                        currentTimeTextEl.textContent =
-                            year + "-" + month + "-" + day + " " +
-                            hour + ":" + minute + ":" + second;
-                    } catch (_err) {
-                        currentTimeTextEl.textContent = "—";
-                    }
-
                     // 2) Uptime
                     try {
                         const response = await fetch("/get_uptime_usec", {
@@ -762,6 +744,24 @@
                         }
                     } catch (_err) {
                         rtcTextEl.textContent = "err";
+                    }
+
+                    // 1) Local time (formatted as YYYY-MM-DD HH:MM:SS)
+                    try {
+                        const now = new Date();
+
+                        const year = now.getFullYear();
+                        const month = String(now.getMonth() + 1).padStart(2, "0");
+                        const day = String(now.getDate()).padStart(2, "0");
+                        const hour = String(now.getHours()).padStart(2, "0");
+                        const minute = String(now.getMinutes()).padStart(2, "0");
+                        const second = String(now.getSeconds()).padStart(2, "0");
+
+                        currentTimeTextEl.textContent =
+                            year + "-" + month + "-" + day + " " +
+                            hour + ":" + minute + ":" + second;
+                    } catch (_err) {
+                        currentTimeTextEl.textContent = "—";
                     }
 
                     // 4) Space Info
