@@ -71,7 +71,7 @@
         }
 
         .uptime-inline {
-            font-size: 0.85rem;
+            font-size: 0.65rem;
             font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono",
                 "Courier New", monospace;
             white-space: nowrap;
@@ -79,7 +79,7 @@
         }
 
         .uptime-inline strong {
-            font-weight: 600;
+            font-weight: 1200;
         }
 
         .link-bar {
@@ -278,10 +278,7 @@
             box-shadow: none;
         }
 
-        .copy-btn[data-copied="true"]::after {
-            content: "Copied!";
-            margin-left: 0.25rem;
-            font-size: 0.75rem;
+        .copy-btn[data-copied="true"] {
             color: #16a34a;
         }
 
@@ -309,20 +306,17 @@
     <div class="app">
         <header class="header">
             <div class="header-top">
-                <div class="title">Console</div>
-
                 <div class="uptime-stack">
                     <div class="uptime-inline">
                         <strong>Local:</strong> <span id="current-time-text">—</span>
                     </div>
                     <div class="uptime-inline">
+                        <strong>Uptime:</strong> <span id="uptime-text"></span>
+                        <strong>Free:</strong> <span id="space-text"></span>
                         <strong>RTC:</strong> <span id="rtc-text">—</span>
                     </div>
                     <div class="uptime-inline">
-                        <strong>Uptime:</strong> <span id="uptime-text">—</span>
-                    </div>
-                    <div class="uptime-inline">
-                        <strong>Free:</strong> <span id="space-text">—</span>
+                        <strong>Last line:</strong> <span id="last-line-text">—</span>
                     </div>
                 </div>
             </div>
@@ -396,6 +390,7 @@
             const uptimeTextEl = document.getElementById("uptime-text");
             const spaceTextEl = document.getElementById("space-text");
             const currentTimeTextEl = document.getElementById("current-time-text");
+            const lastLineTextEl = document.getElementById("last-line-text");
             const rtcTextEl = document.getElementById("rtc-text");
             const setRtcLink = document.getElementById("set-rtc-link");
 
@@ -535,13 +530,11 @@
             async function copyOutputToClipboard() {
                 const text = outputEl.textContent.trim();
                 if (!text) {
-                    setStatus("Nothing to copy");
                     return;
                 }
 
                 const markCopied = () => {
                     copyBtn.dataset.copied = "true";
-                    setStatus("Copied to clipboard");
                     setTimeout(() => {
                         delete copyBtn.dataset.copied;
                     }, 1200);
@@ -649,165 +642,45 @@
 
             function startUptimePolling() {
                 const poll = async () => {
-                    // 2) Uptime
                     try {
-                        const response = await fetch("/get_uptime_usec", {
+                        const response = await fetch("/get_status", {
                             method: "GET",
                             cache: "no-store",
-                            headers: {
-                                Accept:
-                                    "application/json, text/plain;q=0.9, */*;q=0.8",
-                            },
+                            headers: { Accept: "application/json", },
                         });
-
-                        const contentType =
-                            (response.headers.get("content-type") || "").toLowerCase();
-
-                        let usec = null;
-
-                        if (contentType.includes("application/json")) {
-                            const data = await response.json();
-                            if (
-                                data &&
-                                typeof data === "object" &&
-                                "uptime_usec" in data
-                            ) {
-                                usec = Number(data.uptime_usec);
-                            } else if (typeof data === "number") {
-                                usec = data;
-                            }
+                        const data = await response.json();
+                        if (response.ok) {
+                            uptimeTextEl.textContent = (data.uptime_usec / 1e6).toFixed(0) + "s";
+                            const si = data.storage_space_info;
+                            const space_total = si.total - si.min_allowed_free;
+                            const space_free = si.free - si.min_allowed_free;
+                            spaceTextEl.textContent = (space_free / space_total * 100).toFixed(1) + "%";
+                            rtcTextEl.textContent = data.rtc_ts;
+                            lastLineTextEl.textContent = data.last_line;
                         } else {
-                            const rawText = await response.text();
-                            const trimmed = rawText.trim();
-                            if (trimmed) {
-                                const numeric = Number(trimmed.replace(/_/g, ""));
-                                if (Number.isFinite(numeric)) {
-                                    usec = numeric;
-                                }
-                            }
-                        }
-
-                        if (!response.ok) {
-                            uptimeTextEl.textContent = "error";
-                        } else if (typeof usec === "number" && Number.isFinite(usec)) {
-                            const seconds = usec / 1e6;
-                            uptimeTextEl.textContent = seconds.toFixed(3) + " s";
-                        } else {
-                            uptimeTextEl.textContent = "—";
-                        }
-                    } catch (_err) {
-                        uptimeTextEl.textContent = "err";
-                    }
-
-                    // 3) RTC from /get_rtc
-                    try {
-                        const rtcResponse = await fetch("/get_rtc", {
-                            method: "GET",
-                            cache: "no-store",
-                            headers: {
-                                Accept:
-                                    "application/json, text/plain;q=0.9, */*;q=0.8",
-                            },
-                        });
-
-                        const contentTypeRtc =
-                            (rtcResponse.headers.get("content-type") || "").toLowerCase();
-
-                        let rtcDisplay = null;
-
-                        if (contentTypeRtc.includes("application/json")) {
-                            const data = await rtcResponse.json();
-                            if (typeof data === "string" || typeof data === "number") {
-                                rtcDisplay = String(data);
-                            } else if (data && typeof data === "object") {
-                                if ("rtc" in data && data.rtc != null) {
-                                    rtcDisplay = String(data.rtc);
-                                } else if ("time" in data && data.time != null) {
-                                    rtcDisplay = String(data.time);
-                                } else if ("datetime" in data && data.datetime != null) {
-                                    rtcDisplay = String(data.datetime);
-                                } else {
-                                    rtcDisplay = JSON.stringify(data);
-                                }
-                            }
-                        } else {
-                            const text = await rtcResponse.text();
-                            rtcDisplay = text.trim() || null;
-                        }
-
-                        if (!rtcResponse.ok) {
-                            rtcTextEl.textContent = "error";
-                        } else if (rtcDisplay != null) {
-                            rtcTextEl.textContent = rtcDisplay;
-                        } else {
+                            uptimeTextEl.textContent = "";
+                            spaceTextEl.textContent = "";
                             rtcTextEl.textContent = "—";
+                            lastLineTextEl.textContent = "—";
                         }
                     } catch (_err) {
+                        uptimeTextEl.textContent = "";
+                        spaceTextEl.textContent = "";
                         rtcTextEl.textContent = "err";
+                        lastLineTextEl.textContent = "err";
                     }
 
-                    // 1) Local time (formatted as YYYY-MM-DD HH:MM:SS)
                     try {
                         const now = new Date();
-
                         const year = now.getFullYear();
                         const month = String(now.getMonth() + 1).padStart(2, "0");
                         const day = String(now.getDate()).padStart(2, "0");
                         const hour = String(now.getHours()).padStart(2, "0");
                         const minute = String(now.getMinutes()).padStart(2, "0");
                         const second = String(now.getSeconds()).padStart(2, "0");
-
-                        currentTimeTextEl.textContent =
-                            year + "-" + month + "-" + day + " " +
-                            hour + ":" + minute + ":" + second;
+                        currentTimeTextEl.textContent = year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second;
                     } catch (_err) {
                         currentTimeTextEl.textContent = "—";
-                    }
-
-                    // 4) Space Info
-                    try {
-                        const siResponse = await fetch("/get_space_info", {
-                            method: "GET",
-                            cache: "no-store",
-                            headers: {
-                                Accept:
-                                    "application/json, text/plain;q=0.9, */*;q=0.8",
-                            },
-                        });
-
-                        const contentTypeSi =
-                            (siResponse.headers.get("content-type") || "").toLowerCase();
-
-                        let si = null;
-
-                        if (contentTypeSi.includes("application/json")) {
-                            const data = await siResponse.json();
-                            if (
-                                data &&
-                                typeof data === "object" &&
-                                "min_allowed_free" in data
-                            ) {
-                                const space_total = data.total - data.min_allowed_free;
-                                const space_free = data.free - data.min_allowed_free;
-                                si = (space_free / space_total * 100).toFixed(1) + "%";
-                            } else {
-                                si = JSON.stringify(data);
-                            }
-                        } else {
-                            const rawText = await response.text();
-                            const trimmed = rawText.trim();
-                            si = trimmed;
-                        }
-
-                        if (!siResponse.ok) {
-                            spaceTextEl.textContent = "error";
-                        } else if (si != null) {
-                            spaceTextEl.textContent = si;
-                        } else {
-                            spaceTextEl.textContent = "—";
-                        }
-                    } catch (_err) {
-                        spaceTextEl.textContent = "err";
                     }
                 };
 

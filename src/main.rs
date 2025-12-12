@@ -145,7 +145,7 @@ impl LockedFile {
     fn lock(&self) -> Result<MutexGuard<'_, File>> {
         self.locker
             .lock()
-            .map_err(|e| anyhow::anyhow!("lock error: {e}"))
+            .map_err(|e| anyhow::anyhow!("LockedFile lock error: {e}"))
     }
     fn append_data(&self, d: &str) -> Result<()> {
         let i = get_storage_space_info()?;
@@ -159,6 +159,11 @@ impl LockedFile {
         }
         writeln!(f, "{d}")?;
         f.sync_all()?;
+        let mut l = LAST_LINE
+            .lock()
+            .map_err(|e| anyhow::anyhow!("append_data LAST_LINE lock error: {e}"))?;
+        l.clear();
+        l.push_str(d);
         AOk(())
     }
     fn clear_data(&self) -> Result<()> {
@@ -193,6 +198,7 @@ impl LockedFile {
 }
 static DATA_FILE: LockedFile = LockedFile::new_data();
 static SETTINGS_FILE: LockedFile = LockedFile::new_settings();
+static LAST_LINE: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
 fn reset_then_sleep(usec: u64) -> ! {
     unsafe { esp_deep_sleep(usec) }
@@ -474,11 +480,11 @@ fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
 }
 fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHttpServer<'a>> {
     use embedded_svc::io::Read;
-    let get_rtc_fn_i2c = i2c.clone();
+    let get_status_fn_i2c = i2c.clone();
     let set_rtc_fn_i2c = i2c.clone();
+    let get_status_fn_tx = tx.clone();
     let restart_fn_tx = tx.clone();
     let set_settings_fn_tx = tx.clone();
-    let get_uptime_usec_fn_tx = tx.clone();
     let mut http_server = EspHttpServer::new(&HttpConf::default())?;
     http_server.fn_handler("/", HttpMethod::Get, |rq| {
         let mut rs = rq.into_ok_response()?;
@@ -491,23 +497,28 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
         restart_fn_tx.send(Msg::Restart)?;
         AOk(())
     })?;
-    http_server.fn_handler("/get_uptime_usec", HttpMethod::Get, move |rq| {
-        let mut rs = rq.into_ok_response()?;
-        rs.write(uptime_usec().to_string().as_bytes())?;
-        get_uptime_usec_fn_tx.send(Msg::KeepAlive)?;
-        AOk(())
-    })?;
-    http_server.fn_handler("/get_space_info", HttpMethod::Get, move |rq| {
+    #[derive(Serialize, Deserialize)]
+    struct Status {
+        uptime_usec: i64,
+        storage_space_info: StorageSpaceInfo,
+        rtc_ts: String,
+        last_line: String,
+    }
+    http_server.fn_handler("/get_status", HttpMethod::Get, move |rq| {
         let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
-        let i = get_storage_space_info()?;
-        let i = serde_json::to_string(&i)?;
-        rs.write(i.as_bytes())?;
-        AOk(())
-    })?;
-    http_server.fn_handler("/get_rtc", HttpMethod::Get, move |rq| {
-        let mut rs = rq.into_ok_response()?;
-        let mut i2c = lock_i2c(&get_rtc_fn_i2c)?;
-        rs.write(i2c.read_ds3231_rtc_str()?.as_bytes())?;
+        let mut i2c = lock_i2c(&get_status_fn_i2c)?;
+        let s = Status {
+            uptime_usec: uptime_usec(),
+            storage_space_info: get_storage_space_info()?,
+            rtc_ts: i2c.read_ds3231_rtc_str()?,
+            last_line: LAST_LINE
+                .lock()
+                .map_err(|e| anyhow::anyhow!("get_status LAST_LINE lock error: {e}"))?
+                .clone(),
+        };
+        let s = serde_json::to_string(&s)?;
+        rs.write(s.as_bytes())?;
+        get_status_fn_tx.send(Msg::KeepAlive)?;
         AOk(())
     })?;
     http_server.fn_handler("/set_rtc", HttpMethod::Post, move |mut rq| {
