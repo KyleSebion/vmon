@@ -183,8 +183,17 @@ impl LockedFile {
         f.read_to_string(&mut s)?;
         AOk(s)
     }
+    fn read_all_to_string_retry_empty<const TRIES: usize>(&self) -> Result<String> {
+        for _ in 0..TRIES {
+            let s = self.read_all_to_string()?;
+            if !s.is_empty() {
+                return AOk(s);
+            }
+        }
+        AOk(String::new())
+    }
     fn read_settings(&self) -> Result<Settings> {
-        let s = self.read_all_to_string()?;
+        let s = self.read_all_to_string_retry_empty::<5>()?;
         if s.is_empty() {
             AOk(Settings::default())
         } else {
@@ -680,7 +689,7 @@ fn main() -> Result<()> {
     const RECORD_SLEEP_DUR: Duration = Duration::from_micros(RECORD_SLEEP_USEC);
     let short_sleep = || sleep(RECORD_SLEEP_DUR);
     let enter_lo_power = || reset_then_sleep(RECORD_SLEEP_USEC);
-    let enter_ultra_lo_power = || reset_then_sleep(LO_V_SLEEP_USEC);
+    let enter_very_lo_power = || reset_then_sleep(LO_V_SLEEP_USEC);
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -718,11 +727,11 @@ fn main() -> Result<()> {
         match record_measurements(&i2c) {
             Err(e) => {
                 log::error!("record_measurements error: {e}");
-                enter_ultra_lo_power();
+                enter_very_lo_power();
             }
             Ok(v) => {
                 if v <= LO_V {
-                    enter_ultra_lo_power();
+                    enter_very_lo_power();
                 } else if v <= HI_V && woke_from_sleep {
                     enter_lo_power();
                 } else if v > HI_V {
