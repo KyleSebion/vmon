@@ -2,6 +2,7 @@ use anyhow::Ok as AOk;
 use anyhow::Result;
 use embedded_svc::http::Headers;
 use embedded_svc::http::Method as HttpMethod;
+use esp_idf_hal::gpio::Level;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
@@ -602,9 +603,74 @@ struct LaterVars<'a, T: Pin> {
     _w: EspWifi<'a>,
     _h: EspHttpServer<'a>,
 }
+impl<'a, T: Pin> LaterVars<'a, T> {
+    const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
+    fn set_led_level_log_error(&mut self, level: Level, state: &str) {
+        if let Err(e) = self.led.set_level(level) {
+            log::warn!("error set led {state}: {e}");
+        }
+    }
+    fn set_led_c3_supermini_off(&mut self) {
+        self.set_led_level_log_error(Level::High, "off");
+    }
+    fn set_led_c3_supermini_on(&mut self) {
+        self.set_led_level_log_error(Level::Low, "on");
+    }
+    fn handle_msgs(&mut self) {
+        while let Ok(m) = self.rx.try_recv() {
+            match m {
+                Msg::Restart => {
+                    restart();
+                }
+                Msg::KeepAlive => {
+                    self.n = Instant::now();
+                }
+            }
+        }
+    }
+    fn reset_high_power_mode_timer(&mut self) {
+        self.n = Instant::now();
+    }
+    fn should_end_high_power_mode(&self) -> bool {
+        self.n.elapsed() >= Self::HI_POWER_MODE_DUR
+    }
+}
 enum Iter<'a, T: Pin> {
     First,
     NotFirst(LaterVars<'a, T>),
+}
+impl<'a, T: Pin> Iter<'a, T> {
+    fn if_first_change(self, mut op: impl FnMut() -> Result<Self>) -> Result<Self> {
+        if let Iter::First = self {
+            op()
+        } else {
+            AOk(self)
+        }
+    }
+    fn if_not_first(&mut self, op: impl Fn(&mut LaterVars<'a, T>)) {
+        if let Iter::NotFirst(vars) = self {
+            op(vars);
+        }
+    }
+    fn if_notfirst_led_on(&mut self) {
+        self.if_not_first(|vars| vars.set_led_c3_supermini_on());
+    }
+    fn if_notfirst_led_off(&mut self) {
+        self.if_not_first(|vars| vars.set_led_c3_supermini_off());
+    }
+    fn if_notfirst_handle_msgs(&mut self) {
+        self.if_not_first(|vars| vars.handle_msgs());
+    }
+    fn if_notfirst_reset_high_power_mode_timer(&mut self) {
+        self.if_not_first(|vars| vars.reset_high_power_mode_timer());
+    }
+    fn if_notfirst_if_continue_high_power_mode_or_else(&mut self, op: impl Fn()) {
+        self.if_not_first(|vars| {
+            if vars.should_end_high_power_mode() {
+                op();
+            }
+        });
+    }
 }
 fn main() -> Result<()> {
     const HI_V: f64 = 13.0;
@@ -612,7 +678,6 @@ fn main() -> Result<()> {
     const LO_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
     const RECORD_SLEEP_USEC: u64 = 10 * 1000 * 1000;
     const RECORD_SLEEP_DUR: Duration = Duration::from_micros(RECORD_SLEEP_USEC);
-    const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
     let short_sleep = || sleep(RECORD_SLEEP_DUR);
     let enter_lo_power = || reset_then_sleep(RECORD_SLEEP_USEC);
     let enter_ultra_lo_power = || reset_then_sleep(LO_V_SLEEP_USEC);
@@ -633,24 +698,23 @@ fn main() -> Result<()> {
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
     let i2c = Arc::new(Mutex::new(i2c));
+    let woke_from_sleep = woke_from_sleep();
     let mut wifi_modem = Some(peripherals.modem);
     let mut led_gpio = Some(peripherals.pins.gpio8);
     let mut iter = Iter::First;
-    let mut init_not_first = || {
+    let mut mk_not_first = || {
         let (tx, rx) = channel();
-        let led = PinDriver::output(led_gpio.take().expect("led_gpio is taken once"))?;
         let _w = setup_wifi(wifi_modem.take().expect("wifi_modem is taken once"))?;
         let _h = setup_http(i2c.clone(), tx)?;
         let n = Instant::now();
-        AOk(Iter::NotFirst(LaterVars { rx, led, _w, _h, n }))
+        let led = PinDriver::output(led_gpio.take().expect("led_gpio is taken once"))?;
+        let mut vars = LaterVars { rx, led, _w, _h, n };
+        vars.set_led_c3_supermini_off();
+        AOk(Iter::NotFirst(vars))
     };
     loop {
         feed_watchdog();
-        if let Iter::NotFirst(vars) = &mut iter {
-            if let Err(e) = vars.led.set_low() {
-                log::warn!("led on error: {e}");
-            }
-        }
+        iter.if_notfirst_led_on();
         match record_measurements(&i2c) {
             Err(e) => {
                 log::error!("record_measurements error: {e}");
@@ -659,36 +723,17 @@ fn main() -> Result<()> {
             Ok(v) => {
                 if v <= LO_V {
                     enter_ultra_lo_power();
-                } else if v <= HI_V && woke_from_sleep() {
+                } else if v <= HI_V && woke_from_sleep {
                     enter_lo_power();
                 } else if v > HI_V {
-                    if let Iter::NotFirst(vars) = &mut iter {
-                        vars.n = Instant::now();
-                    }
+                    iter.if_notfirst_reset_high_power_mode_timer();
                 }
             }
         }
-        if let Iter::NotFirst(vars) = &mut iter {
-            if let Err(e) = vars.led.set_high() {
-                log::warn!("led off error: {e}");
-            }
-            while let Ok(m) = vars.rx.try_recv() {
-                match m {
-                    Msg::Restart => {
-                        restart();
-                    }
-                    Msg::KeepAlive => {
-                        vars.n = Instant::now();
-                    }
-                }
-            }
-            if vars.n.elapsed() >= HI_POWER_MODE_DUR {
-                enter_lo_power();
-            }
-        }
-        if let Iter::First = &mut iter {
-            iter = init_not_first()?;
-        }
+        iter.if_notfirst_led_off();
+        iter.if_notfirst_handle_msgs();
+        iter.if_notfirst_if_continue_high_power_mode_or_else(enter_lo_power);
+        iter = iter.if_first_change(&mut mk_not_first)?;
         short_sleep();
     }
 }
