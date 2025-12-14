@@ -5,6 +5,8 @@ use embedded_svc::http::Method as HttpMethod;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
+use esp_idf_svc::hal::gpio::Output;
+use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
@@ -37,6 +39,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
 use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -44,7 +47,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::thread::sleep;
 use std::time::Duration;
-use std::time::SystemTime;
+use std::time::Instant;
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -592,6 +595,17 @@ enum Msg {
     Restart,
     KeepAlive,
 }
+struct LaterVars<'a, T: Pin> {
+    n: Instant,
+    rx: Receiver<Msg>,
+    led: PinDriver<'a, T, Output>,
+    _w: EspWifi<'a>,
+    _h: EspHttpServer<'a>,
+}
+enum Iter<'a, T: Pin> {
+    First,
+    NotFirst(LaterVars<'a, T>),
+}
 fn main() -> Result<()> {
     const HI_V: f64 = 13.0;
     const LO_V: f64 = 12.2;
@@ -600,8 +614,8 @@ fn main() -> Result<()> {
     const RECORD_SLEEP_DUR: Duration = Duration::from_micros(RECORD_SLEEP_USEC);
     const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
     let short_sleep = || sleep(RECORD_SLEEP_DUR);
-    let short_reset_sleep = || reset_then_sleep(RECORD_SLEEP_USEC);
-    let long_reset_sleep = || reset_then_sleep(LO_V_SLEEP_USEC);
+    let enter_lo_power = || reset_then_sleep(RECORD_SLEEP_USEC);
+    let enter_ultra_lo_power = || reset_then_sleep(LO_V_SLEEP_USEC);
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
@@ -619,26 +633,84 @@ fn main() -> Result<()> {
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
     let i2c = Arc::new(Mutex::new(i2c));
+    let mut wifi_modem = Some(peripherals.modem);
+    let mut led_gpio = Some(peripherals.pins.gpio8);
+    let mut iter = Iter::First;
+    let mut init_not_first = || {
+        let (tx, rx) = channel();
+        let led = PinDriver::output(led_gpio.take().expect("led_gpio is taken once"))?;
+        let _w = setup_wifi(wifi_modem.take().expect("wifi_modem is taken once"))?;
+        let _h = setup_http(i2c.clone(), tx)?;
+        let n = Instant::now();
+        AOk(Iter::NotFirst(LaterVars { rx, led, _w, _h, n }))
+    };
+    loop {
+        feed_watchdog();
+        if let Iter::NotFirst(vars) = &mut iter {
+            if let Err(e) = vars.led.set_low() {
+                log::warn!("led on error: {e}");
+            }
+        }
+        match record_measurements(&i2c) {
+            Err(e) => {
+                log::error!("record_measurements error: {e}");
+                enter_ultra_lo_power();
+            }
+            Ok(v) => {
+                if v <= LO_V {
+                    enter_ultra_lo_power();
+                } else if v <= HI_V && woke_from_sleep() {
+                    enter_lo_power();
+                } else if v > HI_V {
+                    if let Iter::NotFirst(vars) = &mut iter {
+                        vars.n = Instant::now();
+                    }
+                }
+            }
+        }
+        if let Iter::NotFirst(vars) = &mut iter {
+            if let Err(e) = vars.led.set_high() {
+                log::warn!("led off error: {e}");
+            }
+            while let Ok(m) = vars.rx.try_recv() {
+                match m {
+                    Msg::Restart => {
+                        restart();
+                    }
+                    Msg::KeepAlive => {
+                        vars.n = Instant::now();
+                    }
+                }
+            }
+            if vars.n.elapsed() >= HI_POWER_MODE_DUR {
+                enter_lo_power();
+            }
+        }
+        if let Iter::First = &mut iter {
+            iter = init_not_first()?;
+        }
+        short_sleep();
+    }
 
     if woke_from_sleep() {
         match record_measurements(&i2c) {
             Ok(v) => match v {
-                v if v <= LO_V => long_reset_sleep(),
+                v if v <= LO_V => enter_ultra_lo_power(),
                 v if v >= HI_V => short_sleep(),
-                _ => short_reset_sleep(),
+                _ => enter_lo_power(),
             },
             Err(e) => {
                 log::error!("record_measurements error: {e}");
-                long_reset_sleep();
+                enter_ultra_lo_power();
             }
         }
     }
 
-    let mut hi_power_mode_timer = SystemTime::now();
     let (tx, rx) = channel();
     let _wifi = setup_wifi(peripherals.modem)?;
     let _http = setup_http(i2c.clone(), tx)?;
     let mut led = PinDriver::output(peripherals.pins.gpio8)?;
+    let mut hi_power_mode_timer = Instant::now();
     loop {
         feed_watchdog();
         if let Err(e) = led.set_low() {
@@ -646,8 +718,8 @@ fn main() -> Result<()> {
         }
         match record_measurements(&i2c) {
             Ok(v) => match v {
-                v if v <= LO_V => long_reset_sleep(),
-                v if v >= HI_V => hi_power_mode_timer = SystemTime::now(),
+                v if v <= LO_V => enter_ultra_lo_power(),
+                v if v >= HI_V => hi_power_mode_timer = Instant::now(),
                 _ => {}
             },
             Err(e) => log::error!("record_measurements error: {e}"),
@@ -661,12 +733,12 @@ fn main() -> Result<()> {
                     restart();
                 }
                 Msg::KeepAlive => {
-                    hi_power_mode_timer = SystemTime::now();
+                    hi_power_mode_timer = Instant::now();
                 }
             }
         }
-        if hi_power_mode_timer.elapsed()? >= HI_POWER_MODE_DUR {
-            short_reset_sleep();
+        if hi_power_mode_timer.elapsed() >= HI_POWER_MODE_DUR {
+            enter_lo_power();
         }
         short_sleep();
     }
