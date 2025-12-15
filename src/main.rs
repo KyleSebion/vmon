@@ -650,7 +650,7 @@ enum Iter<'a, T: Pin> {
     NotFirst(LaterVars<'a, T>),
 }
 impl<'a, T: Pin> Iter<'a, T> {
-    fn if_first_change(self, mut op: impl FnMut() -> Result<Self>) -> Result<Self> {
+    fn if_notfirst_take_or(self, mut op: impl FnMut() -> Result<Self>) -> Result<Self> {
         if let Iter::First = self {
             op()
         } else {
@@ -801,7 +801,7 @@ fn main() -> Result<()> {
         iter.if_notfirst_led_off();
         iter.if_notfirst_handle_msgs();
         iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
-        iter = iter.if_first_change(&mut mk_not_first)?;
+        iter = iter.if_notfirst_take_or(&mut mk_not_first)?;
         sleeper.short_sleep();
     }
 }
