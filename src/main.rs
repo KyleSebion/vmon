@@ -33,6 +33,7 @@ use esp_idf_svc::wifi::EspWifi;
 use esp_idf_svc::wifi::Protocol;
 use serde::Deserialize;
 use serde::Serialize;
+use std::cell::OnceCell;
 use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -656,7 +657,7 @@ impl<'a, T: Pin> Iter<'a, T> {
             AOk(self)
         }
     }
-    fn if_not_first(&mut self, op: impl Fn(&mut LaterVars<'a, T>)) {
+    fn if_not_first(&mut self, mut op: impl FnMut(&mut LaterVars<'a, T>)) {
         if let Iter::NotFirst(vars) = self {
             op(vars);
         }
@@ -673,7 +674,7 @@ impl<'a, T: Pin> Iter<'a, T> {
     fn if_notfirst_reset_high_power_mode_timer(&mut self) {
         self.if_not_first(|vars| vars.reset_high_power_mode_timer());
     }
-    fn if_notfirst_if_continue_high_power_mode_or_else(&mut self, op: impl Fn()) {
+    fn if_notfirst_if_continue_high_power_mode_or_else(&mut self, mut op: impl FnMut()) {
         self.if_not_first(|vars| {
             if vars.should_end_high_power_mode() {
                 op();
@@ -681,16 +682,73 @@ impl<'a, T: Pin> Iter<'a, T> {
         });
     }
 }
+struct Sleeper {
+    t0: OnceCell<Instant>,
+}
+impl Sleeper {
+    const fn new() -> Self {
+        Self {
+            t0: OnceCell::new(),
+        }
+    }
+    fn set_t0_now_if_unset(&mut self) {
+        let _ = self.t0.set(Instant::now());
+    }
+    fn get_remaining(&mut self, d: Duration) -> Duration {
+        let t0 = self.t0.take().unwrap_or_else(Instant::now);
+        d.saturating_sub(t0.elapsed())
+    }
+    fn sleep_up_to(&mut self, d: Duration) {
+        let r = self.get_remaining(d);
+        sleep(r);
+    }
+    fn reset_then_sleep_up_to(&mut self, d: Duration) {
+        let r = self.get_remaining(d);
+        reset_then_sleep(u64::try_from(r.as_micros()).unwrap_or(60 * 1000 * 1000));
+    }
+}
+struct SleeperWithPresets {
+    sleeper: Sleeper,
+    short_sleep_dur: Duration,
+    low_power_dur: Duration,
+    very_low_power_dur: Duration,
+}
+impl SleeperWithPresets {
+    fn new(
+        short_sleep_dur: Duration,
+        low_power_dur: Duration,
+        very_low_power_dur: Duration,
+    ) -> Self {
+        let mut s = Self {
+            sleeper: Sleeper::new(),
+            short_sleep_dur,
+            low_power_dur,
+            very_low_power_dur,
+        };
+        s.set_t0_now_if_unset();
+        s
+    }
+    fn set_t0_now_if_unset(&mut self) {
+        self.sleeper.set_t0_now_if_unset();
+    }
+    fn short_sleep(&mut self) {
+        self.sleeper.sleep_up_to(self.short_sleep_dur);
+    }
+    fn enter_low_power(&mut self) {
+        self.sleeper.reset_then_sleep_up_to(self.low_power_dur);
+    }
+    fn enter_very_low_power(&mut self) {
+        self.sleeper.reset_then_sleep_up_to(self.very_low_power_dur);
+    }
+}
+
 fn main() -> Result<()> {
     const HI_V: f64 = 13.0;
     const LO_V: f64 = 12.2;
-    const LO_V_SLEEP_USEC: u64 = 60 * 1000 * 1000;
-    const RECORD_SLEEP_USEC: u64 = 10 * 1000 * 1000;
-    const RECORD_SLEEP_DUR: Duration = Duration::from_micros(RECORD_SLEEP_USEC);
-    let short_sleep = || sleep(RECORD_SLEEP_DUR);
-    let enter_lo_power = || reset_then_sleep(RECORD_SLEEP_USEC);
-    let enter_very_lo_power = || reset_then_sleep(LO_V_SLEEP_USEC);
+    const LO_V_SLEEP_DUR: Duration = Duration::from_micros(60 * 1000 * 1000);
+    const RECORD_SLEEP_DUR: Duration = Duration::from_micros(10 * 1000 * 1000);
     esp_idf_svc::sys::link_patches();
+    let mut sleeper = SleeperWithPresets::new(RECORD_SLEEP_DUR, RECORD_SLEEP_DUR, LO_V_SLEEP_DUR);
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
     feed_watchdog();
@@ -722,18 +780,19 @@ fn main() -> Result<()> {
         AOk(Iter::NotFirst(vars))
     };
     loop {
+        sleeper.set_t0_now_if_unset();
         feed_watchdog();
         iter.if_notfirst_led_on();
         match record_measurements(&i2c) {
             Err(e) => {
                 log::error!("record_measurements error: {e}");
-                enter_very_lo_power();
+                sleeper.enter_very_low_power();
             }
             Ok(v) => {
                 if v <= LO_V {
-                    enter_very_lo_power();
+                    sleeper.enter_very_low_power();
                 } else if v <= HI_V && woke_from_sleep {
-                    enter_lo_power();
+                    sleeper.enter_low_power();
                 } else if v > HI_V {
                     iter.if_notfirst_reset_high_power_mode_timer();
                 }
@@ -741,8 +800,8 @@ fn main() -> Result<()> {
         }
         iter.if_notfirst_led_off();
         iter.if_notfirst_handle_msgs();
-        iter.if_notfirst_if_continue_high_power_mode_or_else(enter_lo_power);
+        iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
         iter = iter.if_first_change(&mut mk_not_first)?;
-        short_sleep();
+        sleeper.short_sleep();
     }
 }
