@@ -710,7 +710,10 @@ impl Sleeper {
     }
     fn reset_then_sleep_up_to(&mut self, d: Duration) {
         let r = self.get_remaining(d);
-        reset_then_sleep(u64::try_from(r.as_micros()).unwrap_or(60 * 1000 * 1000));
+        reset_then_sleep(
+            u64::try_from(r.as_micros())
+                .expect("failure casting remaining duration to u64 in reset_then_sleep_up_to"),
+        );
     }
 }
 struct SleeperWithPresets {
