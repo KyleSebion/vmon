@@ -685,20 +685,24 @@ impl<'a, T: Pin> Iter<'a, T> {
 struct Sleeper {
     t0: OnceCell<Instant>,
     min_sleep: Duration,
+    max_sleep: Duration,
 }
 impl Sleeper {
-    const fn new(min_sleep: Duration) -> Self {
+    const fn new(min_sleep: Duration, max_sleep: Duration) -> Self {
         Self {
             t0: OnceCell::new(),
             min_sleep,
+            max_sleep,
         }
     }
-    fn set_t0_now_if_unset(&mut self) {
-        let _ = self.t0.set(Instant::now());
+    fn set_t0_now_sub_if_unset(&mut self, sub: Duration) {
+        let _ = self.t0.set(Instant::now() - sub);
     }
     fn get_remaining(&mut self, d: Duration) -> Duration {
         let t0 = self.t0.take().unwrap_or_else(Instant::now);
-        d.saturating_sub(t0.elapsed()).max(self.min_sleep)
+        d.saturating_sub(t0.elapsed())
+            .max(self.min_sleep)
+            .min(self.max_sleep)
     }
     fn sleep_up_to(&mut self, d: Duration) {
         let r = self.get_remaining(d);
@@ -718,21 +722,20 @@ struct SleeperWithPresets {
 impl SleeperWithPresets {
     fn new(
         min_sleep: Duration,
+        max_sleep: Duration,
         short_sleep_dur: Duration,
         low_power_dur: Duration,
         very_low_power_dur: Duration,
     ) -> Self {
-        let mut s = Self {
-            sleeper: Sleeper::new(min_sleep),
+        Self {
+            sleeper: Sleeper::new(min_sleep, max_sleep),
             short_sleep_dur,
             low_power_dur,
             very_low_power_dur,
-        };
-        s.set_t0_now_if_unset();
-        s
+        }
     }
-    fn set_t0_now_if_unset(&mut self) {
-        self.sleeper.set_t0_now_if_unset();
+    fn set_t0_now_sub_if_unset(&mut self, sub: Duration) {
+        self.sleeper.set_t0_now_sub_if_unset(sub);
     }
     fn short_sleep(&mut self) {
         self.sleeper.sleep_up_to(self.short_sleep_dur);
@@ -746,20 +749,23 @@ impl SleeperWithPresets {
 }
 
 fn main() -> Result<()> {
+    esp_idf_svc::sys::link_patches();
+    esp_idf_svc::log::EspLogger::initialize_default();
+    log::set_max_level(log::LevelFilter::Debug);
     const HI_V: f64 = 13.0;
     const LO_V: f64 = 12.2;
+    const MAX_SLEEP_DUR: Duration = Duration::from_secs(60);
     const LO_V_SLEEP_DUR: Duration = Duration::from_secs(60);
     const RECORD_SLEEP_DUR: Duration = Duration::from_secs(10);
     const MIN_SLEEP_DUR: Duration = Duration::from_secs(5);
-    esp_idf_svc::sys::link_patches();
     let mut sleeper = SleeperWithPresets::new(
         MIN_SLEEP_DUR,
+        MAX_SLEEP_DUR,
         RECORD_SLEEP_DUR,
         RECORD_SLEEP_DUR,
         LO_V_SLEEP_DUR,
     );
-    esp_idf_svc::log::EspLogger::initialize_default();
-    log::set_max_level(log::LevelFilter::Debug);
+    sleeper.set_t0_now_sub_if_unset(Duration::from_micros(uptime_usec() as u64));
     feed_watchdog();
     mount_storage()?;
     let peripherals = Peripherals::take()?;
@@ -789,7 +795,7 @@ fn main() -> Result<()> {
         AOk(Iter::NotFirst(vars))
     };
     loop {
-        sleeper.set_t0_now_if_unset();
+        sleeper.set_t0_now_sub_if_unset(Duration::ZERO);
         feed_watchdog();
         iter.if_notfirst_led_on();
         match record_measurements(&i2c) {
