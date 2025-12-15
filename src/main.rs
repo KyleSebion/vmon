@@ -633,7 +633,7 @@ impl<'a, T: Pin> LaterVars<'a, T> {
                     restart();
                 }
                 Msg::KeepAlive => {
-                    self.n = Instant::now();
+                    self.reset_high_power_mode_timer();
                 }
             }
         }
