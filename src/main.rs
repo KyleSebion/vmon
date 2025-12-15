@@ -684,11 +684,13 @@ impl<'a, T: Pin> Iter<'a, T> {
 }
 struct Sleeper {
     t0: OnceCell<Instant>,
+    min_sleep: Duration,
 }
 impl Sleeper {
-    const fn new() -> Self {
+    const fn new(min_sleep: Duration) -> Self {
         Self {
             t0: OnceCell::new(),
+            min_sleep,
         }
     }
     fn set_t0_now_if_unset(&mut self) {
@@ -696,7 +698,7 @@ impl Sleeper {
     }
     fn get_remaining(&mut self, d: Duration) -> Duration {
         let t0 = self.t0.take().unwrap_or_else(Instant::now);
-        d.saturating_sub(t0.elapsed())
+        d.saturating_sub(t0.elapsed()).max(self.min_sleep)
     }
     fn sleep_up_to(&mut self, d: Duration) {
         let r = self.get_remaining(d);
@@ -715,12 +717,13 @@ struct SleeperWithPresets {
 }
 impl SleeperWithPresets {
     fn new(
+        min_sleep: Duration,
         short_sleep_dur: Duration,
         low_power_dur: Duration,
         very_low_power_dur: Duration,
     ) -> Self {
         let mut s = Self {
-            sleeper: Sleeper::new(),
+            sleeper: Sleeper::new(min_sleep),
             short_sleep_dur,
             low_power_dur,
             very_low_power_dur,
@@ -745,10 +748,16 @@ impl SleeperWithPresets {
 fn main() -> Result<()> {
     const HI_V: f64 = 13.0;
     const LO_V: f64 = 12.2;
-    const LO_V_SLEEP_DUR: Duration = Duration::from_micros(60 * 1000 * 1000);
-    const RECORD_SLEEP_DUR: Duration = Duration::from_micros(10 * 1000 * 1000);
+    const LO_V_SLEEP_DUR: Duration = Duration::from_secs(60);
+    const RECORD_SLEEP_DUR: Duration = Duration::from_secs(10);
+    const MIN_SLEEP_DUR: Duration = Duration::from_secs(5);
     esp_idf_svc::sys::link_patches();
-    let mut sleeper = SleeperWithPresets::new(RECORD_SLEEP_DUR, RECORD_SLEEP_DUR, LO_V_SLEEP_DUR);
+    let mut sleeper = SleeperWithPresets::new(
+        MIN_SLEEP_DUR,
+        RECORD_SLEEP_DUR,
+        RECORD_SLEEP_DUR,
+        LO_V_SLEEP_DUR,
+    );
     esp_idf_svc::log::EspLogger::initialize_default();
     log::set_max_level(log::LevelFilter::Debug);
     feed_watchdog();
