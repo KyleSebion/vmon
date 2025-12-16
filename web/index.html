@@ -311,8 +311,8 @@
                         <strong>Local:</strong> <span id="current-time-text">—</span>
                     </div>
                     <div class="uptime-inline">
-                        <strong>Uptime:</strong> <span id="uptime-text"></span>
-                        <strong>Free:</strong> <span id="space-text"></span>
+                        <strong>Uptime:</strong> <span id="uptime-text">—</span>
+                        <strong>Free:</strong> <span id="space-text">—</span>
                         <strong>RTC:</strong> <span id="rtc-text">—</span>
                     </div>
                     <div class="uptime-inline">
@@ -658,14 +658,14 @@
                             rtcTextEl.textContent = data.rtc_ts;
                             lastLineTextEl.textContent = data.last_line;
                         } else {
-                            uptimeTextEl.textContent = "";
-                            spaceTextEl.textContent = "";
+                            uptimeTextEl.textContent = "—";
+                            spaceTextEl.textContent = "—";
                             rtcTextEl.textContent = "—";
                             lastLineTextEl.textContent = "—";
                         }
                     } catch (_err) {
-                        uptimeTextEl.textContent = "";
-                        spaceTextEl.textContent = "";
+                        uptimeTextEl.textContent = "err";
+                        spaceTextEl.textContent = "err";
                         rtcTextEl.textContent = "err";
                         lastLineTextEl.textContent = "err";
                     }
