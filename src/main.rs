@@ -67,6 +67,8 @@ impl Default for Settings {
 const STOR_PATH: &str = "/storage";
 const STOR_LBL_STR: &str = "storage";
 const STOR_LBL_CSTR: &CStr = c"storage";
+const DATA_FILE_PATH: &str = "/storage/data.csv";
+const SETTINGS_FILE_PATH: &str = "/storage/settings.json";
 fn try_mount_storage(fmt: bool) -> Result<MountedLittlefs<Littlefs<()>>> {
     let mut littlefs: Littlefs<()> = unsafe { Littlefs::new_partition(STOR_LBL_STR) }?;
     if fmt {
@@ -134,7 +136,7 @@ impl LastLine {
 }
 struct DataFile {}
 impl DataFile {
-    const PATH: &str = "/storage/data.csv";
+    const PATH: &str = DATA_FILE_PATH;
     const HEADER: &str = "rtc_ts,w,v,a,uptime_ms";
     const fn new() -> Self {
         Self {}
@@ -203,7 +205,7 @@ impl LockedDataFile {
 }
 struct SettingsFile {}
 impl SettingsFile {
-    const PATH: &str = "/storage/settings.jsn";
+    const PATH: &str = SETTINGS_FILE_PATH;
     const fn new() -> Self {
         Self {}
     }
