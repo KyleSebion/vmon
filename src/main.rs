@@ -449,12 +449,12 @@ impl I2cDevices {
     }
 }
 
-fn lock_i2c(i2c: &Mutex<I2cDevices>) -> Result<MutexGuard<'_, I2cDevices>> {
-    i2c.lock()
-        .map_err(|e| anyhow::anyhow!("i2c lock error: {e}"))
+fn anyhow_lock<'a, T>(v: &'a Mutex<T>, err_prefix: &'static str) -> Result<MutexGuard<'a, T>> {
+    v.lock()
+        .map_err(|e| anyhow::anyhow!("{err_prefix} anyhow_lock error: {e}"))
 }
 fn record_measurements(i2c: &Mutex<I2cDevices>) -> Result<f64> {
-    let mut i2c = lock_i2c(i2c)?;
+    let mut i2c = anyhow_lock(i2c, "record_measurements i2c")?;
     let uptime_ms = uptime_usec() / 1000;
     let rtc_ts = i2c.read_ds3231_rtc_str()?;
     let w = get_smoothed::<0>(i2c.read_ina219_w()?);
@@ -520,7 +520,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
     }
     http_server.fn_handler("/get_status", HttpMethod::Get, move |rq| {
         let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
-        let mut i2c = lock_i2c(&get_status_fn_i2c)?;
+        let mut i2c = anyhow_lock(&get_status_fn_i2c, "get_status i2c")?;
         let s = Status {
             uptime_usec: uptime_usec(),
             storage_space_info: get_storage_space_info()?,
@@ -549,7 +549,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
             }
         };
         let mut rs = rq.into_ok_response()?;
-        let mut i2c = lock_i2c(&set_rtc_fn_i2c)?;
+        let mut i2c = anyhow_lock(&set_rtc_fn_i2c, "set_rtc i2c")?;
         i2c.set_ds3231_rtc(&dt)?;
         rs.write(b"RTC updated")?;
         AOk(())
