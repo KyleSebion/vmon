@@ -150,24 +150,6 @@ impl LockedFile {
             }),
         }
     }
-    const SETTINGS_FILE_PATH: &str = "/storage/settings.jsn";
-    pub const fn new_settings() -> LockedFile {
-        LockedFile {
-            locker: LazyLock::new(|| {
-                Mutex::new(
-                    OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .truncate(false)
-                        .create(true)
-                        .open(Self::SETTINGS_FILE_PATH)
-                        .unwrap_or_else(|_| {
-                            panic!("failed to open file: {}", Self::SETTINGS_FILE_PATH)
-                        }),
-                )
-            }),
-        }
-    }
     fn lock(&self) -> Result<MutexGuard<'_, File>> {
         self.locker
             .lock()
@@ -191,38 +173,6 @@ impl LockedFile {
     fn clear_data(&self) -> Result<()> {
         let f = self.lock()?;
         f.set_len(0)?;
-        f.sync_all()?;
-        AOk(())
-    }
-    fn read_all_to_string(&self) -> Result<String> {
-        let mut f = self.lock()?;
-        f.rewind()?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)?;
-        AOk(s)
-    }
-    fn read_all_to_string_retry_empty<const TRIES: usize>(&self) -> Result<String> {
-        for _ in 0..TRIES {
-            let s = self.read_all_to_string()?;
-            if !s.is_empty() {
-                return AOk(s);
-            }
-        }
-        AOk(String::new())
-    }
-    fn read_settings(&self) -> Result<Settings> {
-        let s = self.read_all_to_string_retry_empty::<5>()?;
-        if s.is_empty() {
-            AOk(Settings::default())
-        } else {
-            serde_json::from_str(&s).map_err(|e| anyhow::anyhow!("parse error: {e}"))
-        }
-    }
-    fn write_settings(&self, s: Settings) -> Result<()> {
-        let s = serde_json::to_string(&s)?;
-        self.clear_data()?;
-        let mut f = self.lock()?;
-        write!(f, "{s}")?;
         f.sync_all()?;
         AOk(())
     }
