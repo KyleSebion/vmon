@@ -35,6 +35,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::cell::OnceCell;
 use std::ffi::CStr;
+use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -226,9 +227,85 @@ impl LockedFile {
         AOk(())
     }
 }
+struct SettingsFile {}
+impl SettingsFile {
+    const PATH: &str = "/storage/settings.jsn";
+    const fn new() -> Self {
+        Self {}
+    }
+    fn set_str(&self, s: &str) -> Result<()> {
+        fs::write(Self::PATH, s)?;
+        AOk(())
+    }
+    fn set_default_if_needed(&self, force: bool) -> Result<()> {
+        if !fs::exists(Self::PATH)? || force {
+            let s = serde_json::to_string(&Settings::default())?;
+            self.set_str(&s)?;
+        }
+        AOk(())
+    }
+    fn set(&self, s: &Settings) -> Result<()> {
+        let s = serde_json::to_string(s)?;
+        self.set_str(&s)?;
+        AOk(())
+    }
+    fn get_str_from_utf8(&self) -> Result<String> {
+        self.set_default_if_needed(false)?;
+        let r = fs::read(Self::PATH)?;
+        let s = String::from_utf8(r)?;
+        AOk(s)
+    }
+    fn get_str(&self) -> Result<String> {
+        let s = match self.get_str_from_utf8() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("{} is bad; error: {}; resetting to defaults", Self::PATH, e);
+                self.set_default_if_needed(true)?;
+                self.get_str_from_utf8()?
+            }
+        };
+        AOk(s)
+    }
+    fn get(&self) -> Result<Settings> {
+        let str = self.get_str()?;
+        let s = match serde_json::from_str(&str) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "'{}' from {} is bad; error: {}; resetting to defaults",
+                    str,
+                    Self::PATH,
+                    e
+                );
+                self.set_default_if_needed(true)?;
+                serde_json::from_str(&self.get_str()?)?
+            }
+        };
+        AOk(s)
+    }
+}
+struct LockedSettingsFile {
+    locker: LazyLock<Mutex<SettingsFile>>,
+}
+impl LockedSettingsFile {
+    const fn new() -> Self {
+        Self {
+            locker: LazyLock::new(|| Mutex::new(SettingsFile::new())),
+        }
+    }
+    fn lock(&self) -> Result<MutexGuard<'_, SettingsFile>> {
+        anyhow_lock(&self.locker, "LockedSettingsFile lock")
+    }
+    fn set(&self, s: &Settings) -> Result<()> {
+        self.lock().and_then(|f| f.set(s))
+    }
+    fn get(&self) -> Result<Settings> {
+        self.lock().and_then(|f| f.get())
+    }
+}
 static LAST_LINE: LastLine = LastLine::new();
 static DATA_FILE: LockedFile = LockedFile::new_data();
-static SETTINGS_FILE: LockedFile = LockedFile::new_settings();
+static SETTINGS_FILE: LockedSettingsFile = LockedSettingsFile::new();
 
 fn reset_then_sleep(usec: u64) -> ! {
     unsafe { esp_deep_sleep(usec) }
@@ -485,7 +562,7 @@ fn setup_wifi<'a>(modem: Modem) -> Result<EspWifi<'a>> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
     let mut wifi = EspWifi::new(modem, sys_loop, Some(nvs))?;
-    let s = SETTINGS_FILE.read_settings()?;
+    let s = SETTINGS_FILE.get()?;
     let conf = WiFiConf::AccessPoint(AccessPointConfiguration {
         ssid: s
             .wifi_ssid
@@ -589,7 +666,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
     })?;
     http_server.fn_handler("/get_settings", HttpMethod::Get, |rq| {
         let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
-        let s = SETTINGS_FILE.read_settings()?;
+        let s = SETTINGS_FILE.get()?;
         let s = serde_json::to_string(&s)?;
         rs.write(s.as_bytes())?;
         AOk(())
@@ -599,7 +676,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
         let clen = h.content_len().unwrap_or(0) as usize;
         let mut buf = vec![0u8; clen];
         b.read_exact(&mut buf)?;
-        let s = match serde_json::from_slice(&buf) {
+        let mut s = match serde_json::from_slice::<Settings>(&buf) {
             Ok(s) => s,
             Err(e) => {
                 let mut rs = rq.into_response(400, Some("Bad Request"), &[])?;
@@ -607,8 +684,10 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
                 return AOk(());
             }
         };
+        s.wifi_pass = s.wifi_pass.trim().to_string();
+        s.wifi_ssid = s.wifi_ssid.trim().to_string();
         let mut rs = rq.into_ok_response()?;
-        SETTINGS_FILE.write_settings(s)?;
+        SETTINGS_FILE.set(&s)?;
         rs.write(b"Settings updated; Restarting")?;
         set_settings_fn_tx.send(Msg::Restart)?;
         AOk(())
