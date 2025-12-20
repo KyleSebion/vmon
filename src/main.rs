@@ -24,7 +24,6 @@ use esp_idf_svc::sys::esp_littlefs_info;
 use esp_idf_svc::sys::esp_restart;
 use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
 use esp_idf_svc::sys::esp_timer_get_time;
-use esp_idf_svc::sys::esp_vfs_fat_info;
 use esp_idf_svc::sys::rwdt_shim::feed_rtc_wdt;
 use esp_idf_svc::wifi::AccessPointConfiguration;
 use esp_idf_svc::wifi::AuthMethod;
@@ -87,22 +86,23 @@ fn mount_storage() -> Result<MountedLittlefs<Littlefs<()>>> {
 }
 #[derive(Serialize, Deserialize)]
 struct StorageSpaceInfo {
-    total: u64,
-    free: u64,
-    min_allowed_free: u64,
+    total: usize,
+    free: usize,
+    min_allowed_free: usize,
 }
-const STOR_MIN_FREE: u64 = 512 * 1024;
+const STOR_MIN_FREE: usize = 512 * 1024;
 fn get_storage_space_info() -> Result<StorageSpaceInfo> {
-    let mut i = StorageSpaceInfo {
-        total: 0,
-        free: 0,
-        min_allowed_free: STOR_MIN_FREE,
-    };
-    let res = unsafe { esp_vfs_fat_info(STOR_PATH.as_ptr(), &mut i.total, &mut i.free) };
+    let mut total = 0;
+    let mut used = 0;
+    let res = unsafe { esp_littlefs_info(STOR_LBL_CSTR.as_ptr(), &mut total, &mut used) };
     if res != 0 {
-        anyhow::bail!("esp_vfs_fat_info failed; esp_err_t = {res}");
+        anyhow::bail!("esp_littlefs_info failed; esp_err_t = {res}");
     }
-    AOk(i)
+    AOk(StorageSpaceInfo {
+        total,
+        free: total - used,
+        min_allowed_free: STOR_MIN_FREE,
+    })
 }
 fn is_free_space_ok() -> Result<()> {
     let i = get_storage_space_info()?;
