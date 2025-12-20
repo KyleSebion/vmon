@@ -39,7 +39,6 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::io::Seek;
 use std::io::Write;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
@@ -109,6 +108,14 @@ fn get_storage_space_info() -> Result<StorageSpaceInfo> {
     }
     AOk(i)
 }
+fn is_free_space_ok() -> Result<()> {
+    let i = get_storage_space_info()?;
+    if i.free < i.min_allowed_free {
+        anyhow::bail!("not enough free space")
+    } else {
+        AOk(())
+    }
+}
 
 struct LastLine {
     l: LazyLock<Mutex<String>>,
@@ -129,52 +136,73 @@ impl LastLine {
         AOk(())
     }
 }
-struct LockedFile {
-    locker: LazyLock<Mutex<File>>,
-}
-impl LockedFile {
-    const DATA_FILE_PATH: &str = "/storage/data.csv";
-    pub const fn new_data() -> LockedFile {
-        LockedFile {
-            locker: LazyLock::new(|| {
-                Mutex::new(
-                    OpenOptions::new()
-                        .read(true)
-                        .append(true)
-                        .create(true)
-                        .open(Self::DATA_FILE_PATH)
-                        .unwrap_or_else(|_| {
-                            panic!("failed to open file: {}", Self::DATA_FILE_PATH)
-                        }),
-                )
-            }),
-        }
+struct DataFile {}
+impl DataFile {
+    const PATH: &str = "/storage/data.csv";
+    const HEADER: &str = "rtc_ts,w,v,a,uptime_ms";
+    const fn new() -> Self {
+        Self {}
     }
-    fn lock(&self) -> Result<MutexGuard<'_, File>> {
-        self.locker
-            .lock()
-            .map_err(|e| anyhow::anyhow!("LockedFile lock error: {e}"))
+    fn open_file(&self, o: &mut OpenOptions) -> File {
+        o.open(Self::PATH)
+            .unwrap_or_else(|_| panic!("failed to open file: {}", Self::PATH))
+    }
+    fn get_file_append(&self) -> File {
+        self.open_file(OpenOptions::new().append(true).create(true))
+    }
+    fn get_file_read(&self) -> File {
+        self.get_file_append(); // to create if it doesn't exist
+        self.open_file(OpenOptions::new().read(true))
+    }
+    fn len(&self) -> Result<u64> {
+        let f = self.get_file_read();
+        let len = f.metadata()?.len();
+        AOk(len)
+    }
+    fn append_line_raw(&self, l: &str) -> Result<()> {
+        let mut f = self.get_file_append();
+        writeln!(f, "{l}")?;
+        f.sync_all()?;
+        AOk(())
+    }
+    fn write_header_if_needed(&self) -> Result<()> {
+        if self.len()? == 0 {
+            self.append_line_raw(Self::HEADER)?;
+        }
+        AOk(())
     }
     fn append_data(&self, d: &str) -> Result<()> {
-        let i = get_storage_space_info()?;
-        if i.free < i.min_allowed_free {
+        if is_free_space_ok().is_err() {
             log::warn!("append_data canceled due to lack of minimum free space");
             return AOk(());
         }
-        let mut f = self.lock()?;
-        if f.metadata()?.len() == 0 {
-            writeln!(f, "rtc_ts,w,v,a,uptime_ms")?;
-        }
-        writeln!(f, "{d}")?;
-        f.sync_all()?;
+        self.write_header_if_needed()?;
+        self.append_line_raw(d)?;
         LAST_LINE.set(d)?;
         AOk(())
     }
     fn clear_data(&self) -> Result<()> {
-        let f = self.lock()?;
-        f.set_len(0)?;
-        f.sync_all()?;
+        fs::remove_file(Self::PATH)?;
         AOk(())
+    }
+}
+struct LockedDataFile {
+    locker: LazyLock<Mutex<DataFile>>,
+}
+impl LockedDataFile {
+    const fn new() -> Self {
+        Self {
+            locker: LazyLock::new(|| Mutex::new(DataFile::new())),
+        }
+    }
+    fn lock(&self) -> Result<MutexGuard<'_, DataFile>> {
+        anyhow_lock(&self.locker, "LockedDataFile lock")
+    }
+    fn append_data(&self, d: &str) -> Result<()> {
+        self.lock().and_then(|f| f.append_data(d))
+    }
+    fn clear_data(&self) -> Result<()> {
+        self.lock().and_then(|f| f.clear_data())
     }
 }
 struct SettingsFile {}
@@ -254,7 +282,7 @@ impl LockedSettingsFile {
     }
 }
 static LAST_LINE: LastLine = LastLine::new();
-static DATA_FILE: LockedFile = LockedFile::new_data();
+static DATA_FILE: LockedDataFile = LockedDataFile::new();
 static SETTINGS_FILE: LockedSettingsFile = LockedSettingsFile::new();
 
 fn reset_then_sleep(usec: u64) -> ! {
@@ -597,8 +625,8 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
     http_server.fn_handler("/get_data", HttpMethod::Get, |rq| {
         let mut rs = rq.into_response(200, Some("OK"), &[("Content-Type", "text/plain")])?;
         let mut buf = vec![0; 64 * 1024];
-        let mut f = DATA_FILE.lock()?;
-        f.rewind()?;
+        let f = DATA_FILE.lock()?;
+        let mut f = f.get_file_read();
         loop {
             let bytes_read = f.read(&mut buf)?;
             if bytes_read == 0 {
