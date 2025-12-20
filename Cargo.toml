@@ -24,7 +24,7 @@ experimental = ["esp-idf-svc/experimental"]
 
 [dependencies]
 log = "0.4"
-esp-idf-svc = "0.51"
+esp-idf-svc = { version = "0.51", features = ["experimental"] }
 esp-idf-hal = "0.45.2"
 anyhow = "1.0.100"
 embedded-svc = "0.28.1"
@@ -55,3 +55,9 @@ embuild = "0.33"
 component_dirs = ["components"]
 bindings_header  = "components/rwdt_shim/include/rwdt_shim.h"
 bindings_module  = "rwdt_shim"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1.20.3" }
+
+[patch.crates-io]
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc", rev = "7b5bdf50009ac5ef03abb8e713a1adecb48bc6d7" }

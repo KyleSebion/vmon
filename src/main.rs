@@ -4,6 +4,7 @@ use embedded_svc::http::Headers;
 use embedded_svc::http::Method as HttpMethod;
 use esp_idf_hal::gpio::Level;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::fs::littlefs::Littlefs;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
 use esp_idf_svc::hal::gpio::Output;
@@ -16,16 +17,15 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::http::server::Configuration as HttpConf;
 use esp_idf_svc::http::server::EspHttpServer;
+use esp_idf_svc::io::vfs::MountedLittlefs;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::esp_deep_sleep;
+use esp_idf_svc::sys::esp_littlefs_info;
 use esp_idf_svc::sys::esp_restart;
 use esp_idf_svc::sys::esp_sleep_get_wakeup_cause;
 use esp_idf_svc::sys::esp_timer_get_time;
 use esp_idf_svc::sys::esp_vfs_fat_info;
-use esp_idf_svc::sys::esp_vfs_fat_mount_config_t;
-use esp_idf_svc::sys::esp_vfs_fat_spiflash_mount_rw_wl;
 use esp_idf_svc::sys::rwdt_shim::feed_rtc_wdt;
-use esp_idf_svc::sys::wl_handle_t;
 use esp_idf_svc::wifi::AccessPointConfiguration;
 use esp_idf_svc::wifi::AuthMethod;
 use esp_idf_svc::wifi::Configuration as WiFiConf;
@@ -65,29 +65,25 @@ impl Default for Settings {
     }
 }
 
-const STOR_PATH: &CStr = c"/storage";
-fn mount_storage() -> Result<()> {
-    const STOR_LBL: &CStr = c"storage";
-    let mount_config = esp_vfs_fat_mount_config_t {
-        format_if_mount_failed: true,
-        max_files: 4,
-        allocation_unit_size: 4096,
-        disk_status_check_enable: false,
-        use_one_fat: false,
-    };
-    let mut wl_handle: wl_handle_t = 0;
-    let res = unsafe {
-        esp_vfs_fat_spiflash_mount_rw_wl(
-            STOR_PATH.as_ptr(),
-            STOR_LBL.as_ptr(),
-            &mount_config,
-            &mut wl_handle,
-        )
-    };
-    if res != 0 {
-        anyhow::bail!("esp_vfs_fat_spiflash_mount_rw_wl failed; esp_err_t = {res}");
+const STOR_PATH: &str = "/storage";
+const STOR_LBL_STR: &str = "storage";
+const STOR_LBL_CSTR: &CStr = c"storage";
+fn try_mount_storage(fmt: bool) -> Result<MountedLittlefs<Littlefs<()>>> {
+    let mut littlefs: Littlefs<()> = unsafe { Littlefs::new_partition(STOR_LBL_STR) }?;
+    if fmt {
+        littlefs.format()?;
     }
-    AOk(())
+    let mounted = MountedLittlefs::mount(littlefs, STOR_PATH)?;
+    AOk(mounted)
+}
+fn mount_storage() -> Result<MountedLittlefs<Littlefs<()>>> {
+    match try_mount_storage(false) {
+        Ok(mounted) => AOk(mounted),
+        Err(e) => {
+            log::info!("mount failed: {e}; formatting");
+            try_mount_storage(true)
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct StorageSpaceInfo {
@@ -840,7 +836,7 @@ fn main() -> Result<()> {
     );
     sleeper.set_t0_now_sub_if_unset(Duration::from_micros(uptime_usec() as u64));
     feed_watchdog();
-    mount_storage()?;
+    let _storage = mount_storage()?;
     let peripherals = Peripherals::take()?;
     let i2c = I2cDevices::new(
         I2cDriver::new(
