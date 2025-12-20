@@ -108,6 +108,26 @@ fn get_storage_space_info() -> Result<StorageSpaceInfo> {
     }
     AOk(i)
 }
+
+struct LastLine {
+    l: LazyLock<Mutex<String>>,
+}
+impl LastLine {
+    const fn new() -> Self {
+        Self {
+            l: LazyLock::new(|| Mutex::new(String::new())),
+        }
+    }
+    fn get(&self) -> Result<String> {
+        anyhow_lock(&self.l, "LastLine get").and_then(|s| AOk(s.clone()))
+    }
+    fn set(&self, s: &str) -> Result<()> {
+        let mut l = anyhow_lock(&self.l, "LastLine set")?;
+        l.clear();
+        l.push_str(s);
+        AOk(())
+    }
+}
 struct LockedFile {
     locker: LazyLock<Mutex<File>>,
 }
@@ -164,11 +184,7 @@ impl LockedFile {
         }
         writeln!(f, "{d}")?;
         f.sync_all()?;
-        let mut l = LAST_LINE
-            .lock()
-            .map_err(|e| anyhow::anyhow!("append_data LAST_LINE lock error: {e}"))?;
-        l.clear();
-        l.push_str(d);
+        LAST_LINE.set(d)?;
         AOk(())
     }
     fn clear_data(&self) -> Result<()> {
@@ -210,9 +226,9 @@ impl LockedFile {
         AOk(())
     }
 }
+static LAST_LINE: LastLine = LastLine::new();
 static DATA_FILE: LockedFile = LockedFile::new_data();
 static SETTINGS_FILE: LockedFile = LockedFile::new_settings();
-static LAST_LINE: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
 fn reset_then_sleep(usec: u64) -> ! {
     unsafe { esp_deep_sleep(usec) }
@@ -525,10 +541,7 @@ fn setup_http<'a>(i2c: Arc<Mutex<I2cDevices>>, tx: Sender<Msg>) -> Result<EspHtt
             uptime_usec: uptime_usec(),
             storage_space_info: get_storage_space_info()?,
             rtc_ts: i2c.read_ds3231_rtc_str()?,
-            last_line: LAST_LINE
-                .lock()
-                .map_err(|e| anyhow::anyhow!("get_status LAST_LINE lock error: {e}"))?
-                .clone(),
+            last_line: LAST_LINE.get()?,
         };
         let s = serde_json::to_string(&s)?;
         rs.write(s.as_bytes())?;
