@@ -719,14 +719,14 @@ enum Iter<'a, T: Pin> {
 }
 impl<'a, T: Pin> Iter<'a, T> {
     fn if_notfirst_take_or_else(self, mut op: impl FnMut() -> Result<Self>) -> Result<Self> {
-        if let Iter::First = self {
+        if let Self::First = self {
             op()
         } else {
             AOk(self)
         }
     }
     fn if_not_first(&mut self, mut op: impl FnMut(&mut LaterVars<'a, T>)) {
-        if let Iter::NotFirst(vars) = self {
+        if let Self::NotFirst(vars) = self {
             op(vars);
         }
     }
@@ -855,7 +855,7 @@ fn main() -> Result<()> {
     let mut wifi_modem = Some(peripherals.modem);
     let mut led_gpio = Some(peripherals.pins.gpio8);
     let mut iter = Iter::First;
-    let mut mk_not_first = || {
+    let mut mk_notfirst = || {
         let (tx, rx) = channel();
         let _w = setup_wifi(wifi_modem.take().expect("wifi_modem is taken once"))?;
         let _h = setup_http(i2c.clone(), tx)?;
@@ -887,7 +887,7 @@ fn main() -> Result<()> {
         iter.if_notfirst_led_off();
         iter.if_notfirst_handle_msgs();
         iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
-        iter = iter.if_notfirst_take_or_else(&mut mk_not_first)?;
+        iter = iter.if_notfirst_take_or_else(&mut mk_notfirst)?;
         sleeper.short_sleep();
     }
 }
