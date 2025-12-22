@@ -6,10 +6,6 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::fs::littlefs::Littlefs;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
-use esp_idf_svc::hal::gpio::Level;
-use esp_idf_svc::hal::gpio::Output;
-use esp_idf_svc::hal::gpio::Pin;
-use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::modem::Modem;
@@ -49,6 +45,7 @@ use std::sync::MutexGuard;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
+use ws2812_esp32_rmt_driver::Ws2812Esp32RmtDriver;
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -64,9 +61,9 @@ impl Default for Settings {
     }
 }
 
-const STOR_PATH: &str = "/storage";
-const STOR_LBL_STR: &str = "storage";
 const STOR_LBL_CSTR: &CStr = c"storage";
+const STOR_LBL_STR: &str = "storage";
+const STOR_PATH: &str = "/storage";
 const DATA_FILE_PATH: &str = "/storage/data.csv";
 const SETTINGS_FILE_PATH: &str = "/storage/settings.json";
 fn try_mount_storage(fmt: bool) -> Result<MountedLittlefs<Littlefs<()>>> {
@@ -674,25 +671,26 @@ enum Msg {
     Restart,
     KeepAlive,
 }
-struct LaterVars<'a, T: Pin> {
+struct LaterVars<'a> {
     n: Instant,
     rx: Receiver<Msg>,
-    led: PinDriver<'a, T, Output>,
+    led: Ws2812Esp32RmtDriver<'a>,
     _w: EspWifi<'a>,
     _h: EspHttpServer<'a>,
 }
-impl<'a, T: Pin> LaterVars<'a, T> {
+impl<'a> LaterVars<'a> {
     const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
-    fn set_led_level_log_error(&mut self, level: Level, state: &str) {
-        if let Err(e) = self.led.set_level(level) {
+    const LED_STATES: [[u8; 3]; 2] = [[0, 0x20, 0], [0x20, 0, 0]];
+    fn set_led_state_log_error(&mut self, state: usize) {
+        if let Err(e) = self.led.write_blocking(Self::LED_STATES[state].into_iter()) {
             log::warn!("error set led {state}: {e}");
         }
     }
-    fn set_led_c3_supermini_off(&mut self) {
-        self.set_led_level_log_error(Level::High, "off");
+    fn set_led_state_0(&mut self) {
+        self.set_led_state_log_error(0);
     }
-    fn set_led_c3_supermini_on(&mut self) {
-        self.set_led_level_log_error(Level::Low, "on");
+    fn set_led_state_1(&mut self) {
+        self.set_led_state_log_error(1);
     }
     fn handle_msgs(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
@@ -713,11 +711,11 @@ impl<'a, T: Pin> LaterVars<'a, T> {
         self.n.elapsed() >= Self::HI_POWER_MODE_DUR
     }
 }
-enum Iter<'a, T: Pin> {
+enum Iter<'a> {
     First,
-    NotFirst(LaterVars<'a, T>),
+    NotFirst(LaterVars<'a>),
 }
-impl<'a, T: Pin> Iter<'a, T> {
+impl<'a> Iter<'a> {
     fn if_notfirst_take_or_else(self, mut op: impl FnMut() -> Result<Self>) -> Result<Self> {
         if let Self::First = self {
             op()
@@ -725,16 +723,16 @@ impl<'a, T: Pin> Iter<'a, T> {
             AOk(self)
         }
     }
-    fn if_not_first(&mut self, mut op: impl FnMut(&mut LaterVars<'a, T>)) {
+    fn if_not_first(&mut self, mut op: impl FnMut(&mut LaterVars<'a>)) {
         if let Self::NotFirst(vars) = self {
             op(vars);
         }
     }
-    fn if_notfirst_led_on(&mut self) {
-        self.if_not_first(|vars| vars.set_led_c3_supermini_on());
+    fn if_notfirst_led_state_0(&mut self) {
+        self.if_not_first(|vars| vars.set_led_state_0());
     }
-    fn if_notfirst_led_off(&mut self) {
-        self.if_not_first(|vars| vars.set_led_c3_supermini_off());
+    fn if_notfirst_led_state_1(&mut self) {
+        self.if_not_first(|vars| vars.set_led_state_1());
     }
     fn if_notfirst_handle_msgs(&mut self) {
         self.if_not_first(|vars| vars.handle_msgs());
@@ -843,8 +841,8 @@ fn main() -> Result<()> {
     let i2c = I2cDevices::new(
         I2cDriver::new(
             peripherals.i2c0,
-            peripherals.pins.gpio4,
             peripherals.pins.gpio3,
+            peripherals.pins.gpio2,
             &I2cConfig::new().baudrate(400.kHz().into()),
         )?,
         DS3231::new(0x68),
@@ -854,21 +852,26 @@ fn main() -> Result<()> {
     let woke_from_sleep = woke_from_sleep();
     let mut wifi_modem = Some(peripherals.modem);
     let mut led_gpio = Some(peripherals.pins.gpio8);
+    let mut led_channel = Some(peripherals.rmt.channel0);
     let mut iter = Iter::First;
     let mut mk_notfirst = || {
         let (tx, rx) = channel();
         let _w = setup_wifi(wifi_modem.take().expect("wifi_modem is taken once"))?;
         let _h = setup_http(i2c.clone(), tx)?;
         let n = Instant::now();
-        let led = PinDriver::output(led_gpio.take().expect("led_gpio is taken once"))?;
+        let led = Ws2812Esp32RmtDriver::new(
+            led_channel.take().expect("led_channel is taken once"),
+            led_gpio.take().expect("led_gpio is taken once"),
+        )?;
         let mut vars = LaterVars { rx, led, _w, _h, n };
-        vars.set_led_c3_supermini_off();
+        vars.set_led_state_1();
         AOk(Iter::NotFirst(vars))
     };
+
     loop {
         sleeper.set_t0_now_sub_if_unset(Duration::ZERO);
         feed_watchdog();
-        iter.if_notfirst_led_on();
+        iter.if_notfirst_led_state_0();
         match record_measurements(&i2c) {
             Err(e) => {
                 log::error!("record_measurements error: {e}");
@@ -884,7 +887,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        iter.if_notfirst_led_off();
+        iter.if_notfirst_led_state_1();
         iter.if_notfirst_handle_msgs();
         iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
         iter = iter.if_notfirst_take_or_else(&mut mk_notfirst)?;
