@@ -680,7 +680,7 @@ struct LaterVars<'a> {
 }
 impl<'a> LaterVars<'a> {
     const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
-    const LED_STATES: [[u8; 3]; 2] = [[0, 0x20, 0], [0x20, 0, 0]];
+    const LED_STATES: [[u8; 3]; 3] = [[0, 0, 0], [0, 0x20, 0], [0x20, 0, 0]];
     fn set_led_state_log_error(&mut self, state: usize) {
         if let Err(e) = self.led.write_blocking(Self::LED_STATES[state].into_iter()) {
             log::warn!("error set led {state}: {e}");
@@ -691,6 +691,9 @@ impl<'a> LaterVars<'a> {
     }
     fn set_led_state_1(&mut self) {
         self.set_led_state_log_error(1);
+    }
+    fn set_led_state_2(&mut self) {
+        self.set_led_state_log_error(2);
     }
     fn handle_msgs(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
@@ -733,6 +736,9 @@ impl<'a> Iter<'a> {
     }
     fn if_notfirst_led_state_1(&mut self) {
         self.if_not_first(|vars| vars.set_led_state_1());
+    }
+    fn if_notfirst_led_state_2(&mut self) {
+        self.if_not_first(|vars| vars.set_led_state_2());
     }
     fn if_notfirst_handle_msgs(&mut self) {
         self.if_not_first(|vars| vars.handle_msgs());
@@ -816,6 +822,14 @@ impl SleeperWithPresets {
         self.sleeper.reset_then_sleep_up_to(self.very_low_power_dur);
     }
 }
+fn enter_very_low_power<'a>(iter: &mut Iter<'a>, sleeper: &mut SleeperWithPresets) {
+    iter.if_notfirst_led_state_0();
+    sleeper.enter_very_low_power();
+}
+fn enter_low_power<'a>(iter: &mut Iter<'a>, sleeper: &mut SleeperWithPresets) {
+    iter.if_notfirst_led_state_0();
+    sleeper.enter_low_power();
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -867,27 +881,26 @@ fn main() -> Result<()> {
         vars.set_led_state_1();
         AOk(Iter::NotFirst(vars))
     };
-
     loop {
         sleeper.set_t0_now_sub_if_unset(Duration::ZERO);
         feed_watchdog();
-        iter.if_notfirst_led_state_0();
+        iter.if_notfirst_led_state_1();
         match record_measurements(&i2c) {
             Err(e) => {
                 log::error!("record_measurements error: {e}");
-                sleeper.enter_very_low_power();
+                enter_very_low_power(&mut iter, &mut sleeper);
             }
             Ok(v) => {
                 if v <= LO_V {
-                    sleeper.enter_very_low_power();
+                    enter_very_low_power(&mut iter, &mut sleeper);
                 } else if v <= HI_V && woke_from_sleep {
-                    sleeper.enter_low_power();
+                    enter_low_power(&mut iter, &mut sleeper);
                 } else if v > HI_V {
                     iter.if_notfirst_reset_high_power_mode_timer();
                 }
             }
         }
-        iter.if_notfirst_led_state_1();
+        iter.if_notfirst_led_state_2();
         iter.if_notfirst_handle_msgs();
         iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
         iter = iter.if_notfirst_take_or_else(&mut mk_notfirst)?;
