@@ -729,32 +729,32 @@ impl<'a> Iter<'a> {
             AOk(self)
         }
     }
-    fn if_not_first(&mut self, mut op: impl FnMut(&mut LaterVars<'a>)) {
+    fn if_notfirst(&mut self, mut op: impl FnMut(&mut LaterVars<'a>)) {
         if let Self::NotFirst(vars) = self {
             op(vars);
         }
     }
     fn if_notfirst_led_state_0(&mut self) {
-        self.if_not_first(|vars| vars.set_led_state_0());
+        self.if_notfirst(|vars| vars.set_led_state_0());
     }
     fn if_notfirst_led_state_1(&mut self) {
-        self.if_not_first(|vars| vars.set_led_state_1());
+        self.if_notfirst(|vars| vars.set_led_state_1());
     }
     fn if_notfirst_led_state_2(&mut self) {
-        self.if_not_first(|vars| vars.set_led_state_2());
+        self.if_notfirst(|vars| vars.set_led_state_2());
     }
     fn if_notfirst_handle_msgs(&mut self) {
-        self.if_not_first(|vars| vars.handle_msgs());
+        self.if_notfirst(|vars| vars.handle_msgs());
     }
     fn if_notfirst_reset_high_power_mode_timer(&mut self) {
-        self.if_not_first(|vars| vars.reset_high_power_mode_timer());
+        self.if_notfirst(|vars| vars.reset_high_power_mode_timer());
     }
-    fn if_notfirst_if_continue_high_power_mode_or_else(&mut self, mut op: impl FnMut()) {
-        self.if_not_first(|vars| {
-            if vars.should_end_high_power_mode() {
-                op();
-            }
+    fn should_end_notfirst_high_power_mode(&mut self) -> bool {
+        let mut end = false;
+        self.if_notfirst(|vars| {
+            end = vars.should_end_high_power_mode();
         });
+        end
     }
 }
 struct Sleeper {
@@ -908,7 +908,9 @@ fn main() -> Result<()> {
         }
         iter.if_notfirst_led_state_2();
         iter.if_notfirst_handle_msgs();
-        iter.if_notfirst_if_continue_high_power_mode_or_else(|| sleeper.enter_low_power());
+        if iter.should_end_notfirst_high_power_mode() {
+            enter_low_power(&mut iter, &mut sleeper);
+        }
         iter = iter.if_notfirst_take_or_else(&mut mk_notfirst)?;
         sleeper.short_sleep();
     }
