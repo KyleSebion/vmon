@@ -6,10 +6,13 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::fs::littlefs::Littlefs;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::delay::TickType_t;
+use esp_idf_svc::hal::gpio::OutputPin;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::modem::Modem;
+use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::rmt::RmtChannel;
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::http::server::Configuration as HttpConf;
 use esp_idf_svc::http::server::EspHttpServer;
@@ -830,7 +833,14 @@ fn enter_low_power<'a>(iter: &mut Iter<'a>, sleeper: &mut SleeperWithPresets) {
     iter.if_notfirst_led_state_0();
     sleeper.enter_low_power();
 }
-
+fn init_led<'a, C: RmtChannel>(
+    channel: impl Peripheral<P = C> + 'a,
+    pin: impl Peripheral<P = impl OutputPin> + 'a,
+) -> Result<Option<Ws2812Esp32RmtDriver<'a>>> {
+    let mut led = Ws2812Esp32RmtDriver::new(channel, pin)?;
+    led.write_blocking([0, 0, 0].into_iter())?;
+    AOk(Some(led))
+}
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -852,6 +862,7 @@ fn main() -> Result<()> {
     feed_watchdog();
     let _storage = mount_storage()?;
     let peripherals = Peripherals::take()?;
+    let mut led = init_led(peripherals.rmt.channel0, peripherals.pins.gpio8)?;
     let i2c = I2cDevices::new(
         I2cDriver::new(
             peripherals.i2c0,
@@ -865,18 +876,13 @@ fn main() -> Result<()> {
     let i2c = Arc::new(Mutex::new(i2c));
     let woke_from_sleep = woke_from_sleep();
     let mut wifi_modem = Some(peripherals.modem);
-    let mut led_gpio = Some(peripherals.pins.gpio8);
-    let mut led_channel = Some(peripherals.rmt.channel0);
     let mut iter = Iter::First;
     let mut mk_notfirst = || {
         let (tx, rx) = channel();
         let _w = setup_wifi(wifi_modem.take().expect("wifi_modem is taken once"))?;
         let _h = setup_http(i2c.clone(), tx)?;
         let n = Instant::now();
-        let led = Ws2812Esp32RmtDriver::new(
-            led_channel.take().expect("led_channel is taken once"),
-            led_gpio.take().expect("led_gpio is taken once"),
-        )?;
+        let led = led.take().expect("led is taken once");
         let mut vars = LaterVars { rx, led, _w, _h, n };
         vars.set_led_state_2();
         AOk(Iter::NotFirst(vars))
