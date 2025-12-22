@@ -680,7 +680,7 @@ struct LaterVars<'a> {
 }
 impl<'a> LaterVars<'a> {
     const HI_POWER_MODE_DUR: Duration = Duration::from_mins(2);
-    const LED_STATES: [[u8; 3]; 3] = [[0, 0, 0], [0, 0x20, 0], [0x20, 0, 0]];
+    const LED_STATES: [[u8; 3]; 3] = [[0, 0, 0], [0, 0x20, 0], [0, 0, 0x20]];
     fn set_led_state_log_error(&mut self, state: usize) {
         if let Err(e) = self.led.write_blocking(Self::LED_STATES[state].into_iter()) {
             log::warn!("error set led {state}: {e}");
@@ -878,7 +878,7 @@ fn main() -> Result<()> {
             led_gpio.take().expect("led_gpio is taken once"),
         )?;
         let mut vars = LaterVars { rx, led, _w, _h, n };
-        vars.set_led_state_1();
+        vars.set_led_state_2();
         AOk(Iter::NotFirst(vars))
     };
     loop {
