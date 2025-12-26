@@ -874,7 +874,7 @@ fn main() -> Result<()> {
         INA219::new(0x41, 0.1, 3.2, 0x3FFF), // 0x3FFF based on https://www.ti.com/lit/ds/symlink/ina219.pdf
     )?;
     let i2c = Arc::new(Mutex::new(i2c));
-    let woke_from_sleep = woke_from_sleep();
+    let mut woke_from_sleep_and_below_hi_v = woke_from_sleep();
     let mut wifi_modem = Some(peripherals.modem);
     let mut iter = Iter::First;
     let mut mk_notfirst = || {
@@ -899,9 +899,10 @@ fn main() -> Result<()> {
             Ok(v) => {
                 if v <= LO_V {
                     enter_very_low_power(&mut iter, &mut sleeper);
-                } else if v <= HI_V && woke_from_sleep {
+                } else if v < HI_V && woke_from_sleep_and_below_hi_v {
                     enter_low_power(&mut iter, &mut sleeper);
-                } else if v > HI_V {
+                } else if v >= HI_V {
+                    woke_from_sleep_and_below_hi_v = false;
                     iter.if_notfirst_reset_high_power_mode_timer();
                 }
             }
